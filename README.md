@@ -80,9 +80,19 @@ codex-router uninstall
 brew uninstall codex-router
 ```
 
-The first Homebrew install can take considerably longer than the guided
-installer below because the formula builds the locked Python dependencies from
-source. The release workflow generates `Formula/codex-router.rb` from
+The first Homebrew install takes **one to two hours** and looks like nothing is
+happening for most of it. The tap ships no bottles and Homebrew installs Python
+resources with `--no-binary`, so all 104 locked packages are compiled here,
+including the Rust extensions in polars, tokenizers, pydantic-core, and
+cryptography. Each package prints one near-identical
+`==> python3.14 -m pip --python=...` line: that is 104 installs in sequence,
+not a loop. The last full source build in CI took 1h12m on macOS and 2h09m on
+Linux. The guided installer below takes minutes instead, because outside
+Homebrew the same locked versions install as prebuilt wheels. See
+[Troubleshooting](docs/TROUBLESHOOTING.md#brew-install-looks-stuck-repeating-the-same-pip-line)
+for how to watch the build's progress.
+
+The release workflow generates `Formula/codex-router.rb` from
 `requirements/python.txt` and refreshes it for each release.
 
 Maintainers preparing the eventual `homebrew/core` submission should follow

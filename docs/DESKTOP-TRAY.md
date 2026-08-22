@@ -137,19 +137,50 @@ provenance attestation as the source archives:
 | Asset | Platform |
 | --- | --- |
 | `codex-router-tray-<version>-windows-x64.exe` | Windows 10/11 |
-| `codex-router-tray-<version>-linux-x64` | Linux |
+| `codex-router-tray-<version>-linux-x64` | Linux x86-64, glibc 2.39 or newer |
 
-Download it and run it. Nothing else to install.
+Windows 10 and 11 already ship the WebView2 runtime the companion needs, so
+there is nothing else to install: download the `.exe` and run it. To have it
+start at logon as well, point the tray command at the downloaded binary's
+location, or build in place with `./codex-router.ps1 tray`.
+
+The Linux asset is a bare ELF executable with no file extension, so a browser
+may need **Save link as** and will not mark it executable. It also links
+against the same WebKitGTK stack the build machine used, which is not part of a
+minimal desktop install. Download it, verify it, make it executable:
+
+```sh
+version=0.4.0-beta.4   # the release you want
+base=https://github.com/duolahypercho/codex-router/releases/download/v$version
+curl -fL -O "$base/codex-router-tray-$version-linux-x64"
+curl -fL -O "$base/SHA256SUMS"
+# --ignore-missing checks the one asset you downloaded, not all four.
+sha256sum --ignore-missing -c SHA256SUMS
+chmod +x "codex-router-tray-$version-linux-x64"
+"./codex-router-tray-$version-linux-x64"
+```
+
+Its runtime libraries, on Debian or Ubuntu:
+
+```sh
+sudo apt-get install libwebkit2gtk-4.1-0 libsoup-3.0-0 libayatana-appindicator3-1
+```
+
+Fedora uses `webkit2gtk4.1`, `libsoup3`, and `libappindicator-gtk3`; Arch uses
+`webkit2gtk-4.1`, `libsoup3`, and `libayatana-appindicator`.
+
+The release binary is built on the current Ubuntu LTS runner, so it needs
+**glibc 2.39 or newer** (Ubuntu 24.04+, Fedora 40+, Debian 13+, current Arch).
+On an older distribution it exits immediately with
+`version 'GLIBC_2.39' not found`, and no amount of installing WebKitGTK changes
+that — build the companion from source there instead (below), or run the
+Electron shell with `./bin/model-router-tray`, which needs only Node.
 
 **From a CI run (for unreleased changes).** Open the **Actions** tab, pick a
 green **CI** run, and download the **codex-router-tray-Windows** artifact (or
 **codex-router-tray-Linux**) from its Artifacts section. Unzip and run
-`codex-router-desktop.exe`.
-
-Windows 10 and 11 already ship the WebView2 runtime the companion needs, so
-there is nothing else to install. To have it start at logon as well, point the
-tray command at the downloaded binary's location, or build in place with
-`./codex-router.ps1 tray`.
+`codex-router-desktop.exe`; the Linux artifact carries the same glibc and
+WebKitGTK requirements as the release asset.
 
 ## Build prerequisites
 

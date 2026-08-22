@@ -21,6 +21,72 @@ If a recognized older Kimi router is reported:
 
 Neither command prints credential values. Repair refuses unknown router owners.
 
+## `brew install` looks stuck, repeating the same pip line
+
+```
+==> python3.14 -m pip --python=/home/linuxbrew/.linuxbrew/Cellar/codex-router/0.4.0-beta.4/libexec/.venv/bin/python install ...
+```
+
+That line repeats because the formula installs 104 locked Python packages one
+at a time, each printing its own copy of it. It is not a loop and not a retry.
+Homebrew builds every one of them from source — the tap ships no bottles, and
+Homebrew's virtualenv helper passes `--no-binary`, so wheels are never used —
+and several of them (polars, tokenizers, pydantic-core, cryptography, orjson,
+numpy) compile Rust or C extensions. The last full source build in CI took
+**1h12m on macOS and 2h09m on Linux**; a laptop is usually slower. Leave it
+running.
+
+To see real progress rather than the summary lines, read the build log while it
+works:
+
+```sh
+# Linux
+tail -f ~/.cache/Homebrew/Logs/codex-router/*
+# macOS
+tail -f ~/Library/Logs/Homebrew/codex-router/*
+```
+
+`brew install --verbose codex-router` streams the same output directly.
+
+Only treat it as failed when a step prints an error or `brew` exits non-zero.
+If you need the router sooner, the guided installer takes minutes because it
+installs the same locked versions as prebuilt wheels:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/duolahypercho/codex-router/main/install.sh | sh -s -- --guided
+```
+
+That installation is a managed checkout rather than a Homebrew keg: update it
+with `codex-router update`, not `brew upgrade`.
+
+## The downloaded Linux tray binary does not start
+
+`codex-router-tray-<version>-linux-x64` is a bare ELF executable, so a
+downloaded copy is not executable and its libraries are not installed for it:
+
+```sh
+chmod +x codex-router-tray-<version>-linux-x64
+sudo apt-get install libwebkit2gtk-4.1-0 libsoup-3.0-0 libayatana-appindicator3-1
+```
+
+Verify the download itself against the release's `SHA256SUMS` before blaming
+the file — `sha256sum --ignore-missing -c SHA256SUMS` must print `OK`. Assets
+are also covered by build provenance attestation.
+
+Two failures are not fixable by installing packages:
+
+- `version 'GLIBC_2.39' not found` — the release binary is built on the current
+  Ubuntu LTS runner and needs glibc 2.39 or newer (Ubuntu 24.04+, Fedora 40+,
+  Debian 13+, current Arch).
+- `libwebkit2gtk-4.1.so.0: cannot open shared object file` after installing the
+  packages above, on a distribution that packages only WebKitGTK 4.0. The
+  companion uses the 4.1 (libsoup3) series and cannot load 4.0.
+
+On those hosts, build the companion from source with
+`./scripts/build-desktop-tray.sh`, or run the Electron shell with
+`./bin/model-router-tray`, which needs only Node. See
+[the tray guide](DESKTOP-TRAY.md#downloading-a-prebuilt-binary).
+
 ## State directory belongs to another checkout
 
 If `doctor` reports a state ownership failure, you are running from a clone

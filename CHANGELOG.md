@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **The Linux download and the Homebrew build now say what they actually
+  require.** "Download it and run it. Nothing else to install." was true of the
+  Windows companion and wrong about the Linux one: that asset is an
+  extensionless ELF that needs `chmod +x`, WebKitGTK 4.1 with libsoup3, and
+  glibc 2.39 or newer, and it exits immediately without them. The tray guide
+  now carries the download-verify-run sequence and both unfixable failure
+  modes. Homebrew's install is documented with the number people need in front
+  of them: 104 locked packages compiled from source, one to two hours, and a
+  repeated `python3.14 -m pip ...` line that is 104 sequential installs rather
+  than a loop, with the build log to watch and the wheel-based installer as the
+  faster path.
+
 - **Grok 4.6 can select Codex's native image viewer.** xAI stopped without a
   function call when the tool was named `view_image`, even when selection was
   required. The Grok OAuth boundary now presents that tool as `inspect_image`
