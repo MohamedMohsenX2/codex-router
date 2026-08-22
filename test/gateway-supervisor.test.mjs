@@ -6,7 +6,7 @@ import {
   MAX_RESTART_BACKOFF_MS,
   gatewaySupervisorLimits,
   restartBackoffMs,
-  superviseGateway,
+  superviseChild,
 } from "../src/gateway-supervisor.mjs";
 
 // A stand-in for a spawned process that is only ever asked the two questions
@@ -27,7 +27,7 @@ function fakeChild(id) {
   return child;
 }
 
-function harness({ health = () => Promise.resolve(), limits = {} } = {}) {
+function harness({ health = () => Promise.resolve(), limits = {}, watch } = {}) {
   const spawned = [];
   const logs = [];
   let shuttingDown = false;
@@ -48,11 +48,12 @@ function harness({ health = () => Promise.resolve(), limits = {} } = {}) {
   };
 
   const first = start();
-  const done = superviseGateway({
+  const done = superviseChild({
     child: first,
     start,
     waitForExit,
     waitForHealth: (child) => health(child, spawned.indexOf(child)),
+    watch,
     isShuttingDown: () => shuttingDown,
     log: (message) => logs.push(message),
     sleep: async (ms) => {
@@ -211,7 +212,7 @@ test("failures outside the window do not count against the bound", async () => {
         });
 
   const first = start();
-  const done = superviseGateway({
+  const done = superviseChild({
     child: first,
     start,
     waitForExit,
@@ -241,4 +242,56 @@ test("failures outside the window do not count against the bound", async () => {
   const result = await done;
   assert.equal(result.exhausted, true);
   assert.equal(spawned.length, 6, "the bound did not stop the spawn loop");
+});
+
+// The wedge case. A child that stops serving without exiting resolves nothing,
+// so before the watchdog the supervisor sat waiting on an exit that was never
+// coming while every client request was refused. The watchdog does not restart
+// anything itself: it stops the child, and that stop arrives here as an
+// ordinary exit, counted and backed off like any crash.
+test("a child stopped by its liveness watchdog is restarted like a crash", async () => {
+  const watched = [];
+  const supervisor = harness({
+    watch: (child) => {
+      const handle = { child, cancelled: false, cancel: () => (handle.cancelled = true) };
+      watched.push(handle);
+      return handle;
+    },
+  });
+
+  assert.equal(watched.length, 1, "the first child was never watched");
+  // What the watchdog does when it trips.
+  watched[0].child.kill("SIGTERM");
+  for (let tick = 0; tick < 6; tick += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+
+  assert.equal(supervisor.spawned.length, 2, "the wedged child was not replaced");
+  assert.equal(watched.length, 2, "the replacement was left unwatched");
+  assert.equal(watched[0].cancelled, true, "the dead child is still being probed");
+  assert.equal(watched[1].cancelled, false);
+
+  supervisor.shutDown();
+  supervisor.spawned[1].exit(0);
+  await supervisor.done;
+  assert.equal(watched[1].cancelled, true, "the watch outlived the supervisor");
+});
+
+// A restart note names what the caller loses, and the two supervised children
+// lose different things: the gateway's default says the router stays up, which
+// would be a lie in the router's own log.
+test("the restart note is the caller's, not the gateway's", async () => {
+  const supervisor = harness({
+    limits: { restartNote: "Clients are refused until it answers again." },
+  });
+  supervisor.spawned[0].exit(1);
+  for (let tick = 0; tick < 4; tick += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.match(supervisor.logs[0], /Clients are refused until it answers again\./);
+  assert.doesNotMatch(supervisor.logs[0], /router stays up/);
+
+  supervisor.shutDown();
+  supervisor.spawned[1].exit(0);
+  await supervisor.done;
 });

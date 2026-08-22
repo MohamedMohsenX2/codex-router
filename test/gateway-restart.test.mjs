@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -187,6 +187,107 @@ test("a gateway that dies mid-request is restarted and the router keeps serving"
     rmSync(rootDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 });
+
+// The router used to be the one child whose death ended everything: start.mjs
+// raced its exit, so a router fault discarded a healthy gateway too and paid
+// LiteLLM's cold import before anyone could be served again. What the user saw
+// was the turn dying with `stream closed before response.completed` and every
+// reconnect after it failing with `error sending request`. It is supervised in
+// place now, and this is the proof: kill it outright, and the service neither
+// exits nor restarts anything else.
+//
+// POSIX only, and not for want of caring about Windows: the router is a
+// grandchild of this test, so finding it means asking the OS which child of the
+// service is running router.mjs. `pgrep` does that in one portable-enough call;
+// the Windows equivalent is a WMI query for a different process tree shape, and
+// the behaviour under test is platform-independent.
+test(
+  "a router that dies is restarted in place, without rebuilding the service",
+  { timeout: 180_000, skip: process.platform === "win32" ? "POSIX-only process lookup" : false },
+  async () => {
+    const ports = await Promise.all(Array.from({ length: 5 }, () => freePort()));
+    const [routerPort, gatewayPort, oauthPort, apiPort, grokOauthPort] = ports;
+    const rootDir = mkdtempSync(path.join(os.tmpdir(), "model-router-router-restart-"));
+    const stateDir = path.join(rootDir, "state");
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    writeFileSync(path.join(stateDir, "internal-secret"), "router-restart-internal-key-with-sufficient-length\n", { mode: 0o600 });
+    writeFileSync(path.join(stateDir, "caller-secret"), "router-restart-caller-key-with-sufficient-length\n", { mode: 0o600 });
+    const gatewayBin = writeFakeGateway(rootDir, path.join(rootDir, "fake-gateway.mjs"));
+
+    const child = spawn(process.execPath, [path.join(root, "src", "start.mjs")], {
+      cwd: root,
+      env: {
+        ...process.env,
+        MODEL_ROUTER_TARGET: "codex",
+        MODEL_ROUTER_STATE_DIR: stateDir,
+        MODEL_ROUTER_PORT: String(routerPort),
+        MODEL_ROUTER_GATEWAY_PORT: String(gatewayPort),
+        MODEL_ROUTER_OAUTH_PORT: String(oauthPort),
+        MODEL_ROUTER_API_PORT: String(apiPort),
+        MODEL_ROUTER_GROK_OAUTH_PORT: String(grokOauthPort),
+        MODEL_ROUTER_LITELLM_BIN: gatewayBin,
+        CODEX_ROUTER_RESTART_BACKOFF_MS: "50",
+        CODEX_ROUTER_HOME: rootDir,
+        CODEX_HOME: rootDir,
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let errors = "";
+    let exited;
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      errors += chunk;
+    });
+    child.once("exit", (code, signal) => {
+      exited = { code, signal };
+    });
+
+    const readExit = () => exited;
+    try {
+      await waitFor(() => errors, readExit, /\[codex-router\] ready \(authenticated loopback endpoint\)/);
+      assert.equal((await get(`http://127.0.0.1:${routerPort}/health`)).status, 200, errors);
+
+      const found = spawnSync("pgrep", ["-P", String(child.pid), "-f", "router.mjs"], {
+        encoding: "utf8",
+      });
+      const routerPid = Number(found.stdout.trim().split("\n")[0]);
+      assert.ok(Number.isInteger(routerPid) && routerPid > 0, `no router child found: ${found.stdout}`);
+
+      // SIGKILL, because the interesting failure is the one the process cannot
+      // handle on its way out.
+      process.kill(routerPid, "SIGKILL");
+
+      await waitFor(
+        () => errors,
+        readExit,
+        /\[codex-router\] Codex router exited \(code=null, signal=SIGKILL\); restarting in 50 ms \(restart 1 of 5\)/,
+      );
+      assert.match(errors, /Clients are refused until it answers again/);
+      await waitFor(
+        () => errors,
+        readExit,
+        /\[codex-router\] Codex router is healthy again after 1 restart\(s\)\./,
+      );
+
+      assert.equal(exited, undefined, `the service was rebuilt instead of restarting the router:\n${errors}`);
+      assert.equal(
+        (await get(`http://127.0.0.1:${routerPort}/health`)).status,
+        200,
+        `the replacement router is not serving:\n${errors}`,
+      );
+      // The point of restarting in place: the gateway was never touched, so
+      // nobody paid its cold start.
+      assert.doesNotMatch(errors, /LiteLLM gateway exited/);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await get(`http://127.0.0.1:${gatewayPort}/quit`);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      rmSync(rootDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  },
+);
 
 // The Windows half of the launch cannot be exercised on POSIX -- the batch shim
 // is pass-through here -- so the wiring is asserted directly. Without it, a

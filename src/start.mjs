@@ -15,7 +15,12 @@ import {
   loopback,
 } from "./paths.mjs";
 import { waitForHealth as pollHealth } from "./health-probe.mjs";
-import { gatewaySupervisorLimits, superviseGateway } from "./gateway-supervisor.mjs";
+import {
+  gatewaySupervisorLimits,
+  routerSupervisorLimits,
+  superviseChild,
+} from "./gateway-supervisor.mjs";
+import { livenessLimits, watchLiveness } from "./liveness-watchdog.mjs";
 import { writeLiteLlmConfig } from "./litellm-config.mjs";
 import { MODELS } from "./model-registry.mjs";
 import { readLocalModelSelection } from "./local-models.mjs";
@@ -307,22 +312,34 @@ async function main() {
 
   const frontend = FRONTEND;
   const frontendService = frontend.service;
-  const router = run(process.execPath, [path.join(SOURCE_ROOT, "src", frontend.script)]);
-  await waitForHealth(
-    frontend.label,
-    loopback(PORTS.router, "/health"),
-    {},
-    30_000,
-    frontendService,
-    router,
-  );
+  const startRouter = () => run(process.execPath, [path.join(SOURCE_ROOT, "src", frontend.script)]);
+  const routerHealthy = (child) =>
+    waitForHealth(
+      frontend.label,
+      loopback(PORTS.router, "/health"),
+      {},
+      30_000,
+      frontendService,
+      child,
+    );
+  const router = startRouter();
+  await routerHealthy(router);
 
   console.error(`[${frontendService}] ready (authenticated loopback endpoint)`);
-  // Only the gateway is supervised. The forwarders and the router are ours and
-  // are restarted by rebuilding the whole service; the gateway is a third-party
-  // Python process that can end itself on a single bad upstream response
-  // (issue #261, a 429 raised out of LiteLLM's exception mapping), and taking
-  // the router down with it turned one failed request into a dead session.
+  const supervisorLog = (message) => console.error(`[${frontendService}] ${message}`);
+  const liveness = livenessLimits();
+  // Health was checked once, above, and never again, so a child that stopped
+  // serving without exiting was invisible to this race: the router could sit
+  // wedged with clients getting refused connections while the service
+  // considered itself healthy. Every supervised child is now probed for its
+  // whole life, and one that stops answering is stopped, which turns a wedge
+  // into the crash path below.
+  const watchChild = (label, url, headers = {}) => (child) =>
+    watchLiveness({ label, child, url, headers, isShuttingDown: () => shuttingDown, log: supervisorLog, ...liveness });
+  // The gateway and the router are both supervised in place. The forwarders are
+  // ours, small, and single-purpose: one that dies is a bug report, and the
+  // rule for those is unchanged -- the service exits and the OS supervisor
+  // rebuilds it.
   const result = await Promise.race([
     waitForExit(kimiForwarder, "OAuth forwarder"),
     waitForExit(api, "API forwarder"),
@@ -334,17 +351,33 @@ async function main() {
     // that never spawned it adds no entry, so this cannot end anyone else's
     // session.
     ...(devinForwarder ? [waitForExit(devinForwarder, "Devin CLI forwarder")] : []),
-    superviseGateway({
+    superviseChild({
       label: "LiteLLM gateway",
       child: gateway,
       start: startGateway,
       waitForExit,
       waitForHealth: gatewayHealthy,
+      watch: watchChild("LiteLLM gateway", loopback(PORTS.gateway, "/health/liveliness"), {
+        Authorization: `Bearer ${internalKey}`,
+      }),
       isShuttingDown: () => shuttingDown,
-      log: (message) => console.error(`[${frontendService}] ${message}`),
+      log: supervisorLog,
       ...gatewaySupervisorLimits(),
     }),
-    waitForExit(router, frontend.label),
+    superviseChild({
+      label: frontend.label,
+      child: router,
+      start: startRouter,
+      waitForExit,
+      waitForHealth: routerHealthy,
+      watch: watchChild(frontend.label, loopback(PORTS.router, "/health")),
+      restartNote:
+        "Clients are refused until it answers again; the gateway and forwarders stay up, " +
+        "so this costs about a second instead of a full service rebuild.",
+      isShuttingDown: () => shuttingDown,
+      log: supervisorLog,
+      ...routerSupervisorLimits(),
+    }),
   ]);
   if (!shuttingDown) {
     console.error(

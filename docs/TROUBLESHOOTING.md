@@ -458,6 +458,54 @@ Do not kill the process until its owner and purpose are known. The installer
 migrates only recognized earlier repository services and otherwise stops with a
 conflict.
 
+## The router goes offline mid-session
+
+Codex reports `stream disconnected before completion: stream closed before
+response.completed`, its reconnects fail with `error sending request`, and the
+control center shows **Router: Offline** with its own command timing out. Those
+are one event: the router stopped serving mid-turn, so the open stream ended
+without its terminal event and every reconnect hit a port with nothing behind
+it.
+
+The router is supervised in place. A crash is replaced within about a second,
+and a router that is alive but has stopped answering is probed, stopped, and
+replaced the same way — the gateway and forwarders are left running, so nobody
+pays LiteLLM's cold start for a router fault. `router.log` names what happened:
+
+```sh
+grep -E "Codex router (exited|is healthy again|did not answer|has not answered)" \
+  ~/.codex/codex-router/router.log
+```
+
+- `Codex router exited (...); restarting in ...` — it crashed and came back. The
+  line above it, `request failed: ...`, names the cause.
+- `Codex router did not answer its liveness probe (n of 4 ...)` — it was alive
+  and unreachable; four consecutive misses replace it.
+- `... after N restart(s) within 600s; not restarting it again.` — the restart
+  budget is spent. The service exits so the OS supervisor performs a clean
+  rebuild, which is the one case where the gateway restarts too.
+
+Repeated restarts are a bug report, not a cure: capture `router.log` and open an
+issue. Only a probe that is refused or times out counts as a miss — a 503 while
+a provider is down is an answer, and never restarts anything.
+
+The defaults can be changed in the service environment, and `0` disables:
+
+| Variable | Default | Governs |
+| --- | --- | --- |
+| `CODEX_ROUTER_RESTARTS` | 5 | Router restarts allowed inside the window |
+| `CODEX_ROUTER_RESTART_WINDOW_MS` | 600000 | That window |
+| `CODEX_ROUTER_RESTART_BACKOFF_MS` | 1000 | First backoff, doubling to 30s |
+| `CODEX_ROUTER_LIVENESS_FAILURES` | 4 | Missed probes before a restart |
+| `CODEX_ROUTER_LIVENESS_INTERVAL_MS` | 15000 | Probe interval |
+| `CODEX_ROUTER_LIVENESS_TIMEOUT_MS` | 5000 | How long one probe waits |
+
+Set `CODEX_ROUTER_LIVENESS_FAILURES=0` when investigating a wedge: a hung
+process stays hung and inspectable instead of being replaced.
+
+If the router never comes back at all, nothing above is running — the service
+itself is down. That is the next section.
+
 ## The background service is stopped
 
 macOS:

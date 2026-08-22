@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **A router fault no longer ends the session.** The router was the one child
+  whose death exited the whole service: the OS supervisor rebuilt everything,
+  discarding a healthy gateway and paying LiteLLM's cold Python import, and for
+  that whole window clients were refused. What that looked like from Codex was a
+  turn dying with `stream closed before response.completed` followed by
+  reconnects failing with `error sending request`. The router is now supervised
+  in place by the same bounded, backed-off, never-silent loop the gateway has
+  had since #261 — about a second to recover, with the gateway untouched.
+  Exhausting the restart budget still exits the service for a clean rebuild.
+  `CODEX_ROUTER_RESTARTS`, `CODEX_ROUTER_RESTART_WINDOW_MS` and
+  `CODEX_ROUTER_RESTART_BACKOFF_MS` tune it; `0` restores the old behavior.
+
+- **A supervised child that hangs is now noticed at all.** Health was probed
+  once at startup and never again, and supervision keyed on process exit, so a
+  child that stayed alive while it stopped serving was invisible: nothing
+  resolved, nothing restarted, and the control center showed the router Offline
+  while the service considered itself healthy. Every supervised child is now
+  probed for its whole life, and one that misses four consecutive probes is
+  stopped — which turns a wedge into the crash path above, bounded by the same
+  restart budget. Liveness is deliberately the weakest question: any HTTP answer
+  counts, including the 503 the router returns while a provider is down, so only
+  a refused or timed-out probe is evidence. SIGTERM escalates to SIGKILL,
+  because a blocked event loop never runs its own signal handler.
+  `CODEX_ROUTER_LIVENESS_FAILURES=0` turns the watchdog off for investigating a
+  hang in place.
+
 - **The released Linux companion runs on Ubuntu 22.04 and Debian 12 again.**
   A dynamically linked binary keeps the glibc symbol versions of the machine
   that built it, and building on the newest runner image put a floor of glibc

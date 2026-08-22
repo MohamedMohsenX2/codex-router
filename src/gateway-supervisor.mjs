@@ -1,8 +1,23 @@
+// Supervision for a child the service cannot afford to lose. It was written
+// for the LiteLLM gateway and now also carries the router; the mechanism never
+// was gateway-specific, only its first caller was.
+//
 // The LiteLLM gateway is the one child of the service that is not ours. It is
 // a large Python process pinned by `requirements/python.txt`, and a bug
 // anywhere in that tree can end the process rather than the request -- issue
 // #261 is exactly that: mapping an upstream 429 raised out of the request
 // handler and the proxy exited 1.
+//
+// The router is ours, and the rule used to be that a router crash exits the
+// service so the OS supervisor rebuilds it. That rebuild is not cheap: it also
+// discards a healthy gateway and pays LiteLLM's cold Python import, which
+// start.mjs allows up to five minutes for, and every client request in that
+// window is refused. One router fault therefore cost the whole session --
+// `stream closed before response.completed`, then reconnects failing with
+// `error sending request`. Restarting the router in place costs about a second
+// and leaves the gateway untouched. The escape hatch is unchanged: when the
+// restarts in the window are exhausted the supervisor returns, the service
+// exits, and the OS supervisor does the clean rebuild after all.
 //
 // Before this module, `start.mjs` raced every child's exit and tore the whole
 // service down when any of them died, so a gateway crash took the router and
@@ -60,24 +75,42 @@ function positiveInteger(value, fallback, { allowZero = false } = {}) {
   return floored;
 }
 
-// `CODEX_ROUTER_GATEWAY_RESTARTS=0` disables supervision entirely and restores
-// the pre-#261 behaviour, which is what a bisect or a crash investigation
-// wants: the process should die where it died.
-export function gatewaySupervisorLimits(env = process.env) {
+// Setting the restart count to 0 disables supervision entirely and restores the
+// pre-#261 behaviour, which is what a bisect or a crash investigation wants:
+// the process should die where it died.
+export function supervisorLimits(
+  { restarts, backoff, window: windowKey },
+  env = process.env,
+) {
   return {
-    maxRestarts: positiveInteger(env.CODEX_ROUTER_GATEWAY_RESTARTS, DEFAULT_MAX_RESTARTS, {
-      allowZero: true,
-    }),
-    backoffMs: positiveInteger(
-      env.CODEX_ROUTER_GATEWAY_RESTART_BACKOFF_MS,
-      DEFAULT_RESTART_BACKOFF_MS,
-      { allowZero: true },
-    ),
-    windowMs: positiveInteger(
-      env.CODEX_ROUTER_GATEWAY_RESTART_WINDOW_MS,
-      DEFAULT_RESTART_WINDOW_MS,
-    ),
+    maxRestarts: positiveInteger(env[restarts], DEFAULT_MAX_RESTARTS, { allowZero: true }),
+    backoffMs: positiveInteger(env[backoff], DEFAULT_RESTART_BACKOFF_MS, { allowZero: true }),
+    windowMs: positiveInteger(env[windowKey], DEFAULT_RESTART_WINDOW_MS),
   };
+}
+
+export function gatewaySupervisorLimits(env = process.env) {
+  return supervisorLimits(
+    {
+      restarts: "CODEX_ROUTER_GATEWAY_RESTARTS",
+      backoff: "CODEX_ROUTER_GATEWAY_RESTART_BACKOFF_MS",
+      window: "CODEX_ROUTER_GATEWAY_RESTART_WINDOW_MS",
+    },
+    env,
+  );
+}
+
+// Deliberately not `CODEX_ROUTER_ROUTER_*`: the prefix already names the
+// product, and these govern its own front process.
+export function routerSupervisorLimits(env = process.env) {
+  return supervisorLimits(
+    {
+      restarts: "CODEX_ROUTER_RESTARTS",
+      backoff: "CODEX_ROUTER_RESTART_BACKOFF_MS",
+      window: "CODEX_ROUTER_RESTART_WINDOW_MS",
+    },
+    env,
+  );
 }
 
 function isRunning(child) {
@@ -89,19 +122,31 @@ function reason(error) {
 }
 
 /**
- * Watch an already-healthy gateway child and restart it in place when it dies.
+ * Watch an already-healthy child and restart it in place when it dies.
  *
  * Resolves with the same shape `waitForExit` produces -- `{ label, code,
  * signal }` -- so the caller can keep racing it against the other children.
  * `restarts` counts the crashes seen, and `exhausted` is true when the loop
  * gave up rather than the service shutting down.
+ *
+ * `watch` is handed each live child and returns a `{ cancel }` handle. It is
+ * how a child that hangs instead of exiting reaches this loop at all: the
+ * watchdog stops it, the stop resolves `waitForExit`, and a wedge is counted,
+ * backed off and health-checked exactly like a crash. The handle is cancelled
+ * on every other exit path so a dead child is never probed.
  */
-export async function superviseGateway({
+export async function superviseChild({
   label = "LiteLLM gateway",
   child,
   start,
   waitForExit,
   waitForHealth,
+  watch = () => null,
+  // What a caller loses while this child is away. The two supervised children
+  // fail differently -- a gateway restart leaves the router answering with an
+  // upstream error, a router restart refuses the connection outright -- and a
+  // log line that describes the wrong one is worse than none.
+  restartNote = "The router stays up; requests fail with an upstream error until it answers again.",
   stop = (target) => target.kill("SIGTERM"),
   isShuttingDown = () => false,
   log = (message) => console.error(message),
@@ -116,7 +161,13 @@ export async function superviseGateway({
   const failures = [];
 
   for (;;) {
-    const exit = await waitForExit(current, label);
+    const watcher = watch(current);
+    let exit;
+    try {
+      exit = await waitForExit(current, label);
+    } finally {
+      watcher?.cancel();
+    }
     if (isShuttingDown()) return { ...exit, restarts };
 
     const at = now();
@@ -137,8 +188,7 @@ export async function superviseGateway({
     const wait = restartBackoffMs(failures.length - 1, backoffMs);
     log(
       `${label} exited (${describeExit}); restarting in ${wait} ms ` +
-        `(restart ${failures.length} of ${maxRestarts}). The router stays up; ` +
-        `requests fail with an upstream error until it answers again.`,
+        `(restart ${failures.length} of ${maxRestarts}). ${restartNote}`,
     );
     await sleep(wait);
     if (isShuttingDown()) return { ...exit, restarts };
