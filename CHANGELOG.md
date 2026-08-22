@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **The released Linux companion runs on Ubuntu 22.04 and Debian 12 again.**
+  A dynamically linked binary keeps the glibc symbol versions of the machine
+  that built it, and building on the newest runner image put a floor of glibc
+  2.39 under the download: on anything older it exited immediately with
+  `version 'GLIBC_2.39' not found`, which reads as a corrupt file rather than a
+  build decision. The Linux tray is now built in an Ubuntu 22.04 container in
+  both CI and the release workflow, lowering the floor to glibc 2.35 — as low
+  as it goes while WebKitGTK 4.1 is still packaged. `scripts/check-glibc-floor.sh`
+  asserts the floor after every build, so a moving base image fails the job
+  instead of the download.
+
 - **The Linux download and the Homebrew build now say what they actually
   require.** "Download it and run it. Nothing else to install." was true of the
   Windows companion and wrong about the Linux one: that asset is an

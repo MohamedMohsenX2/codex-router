@@ -32,7 +32,7 @@ jobs:
         run: swift test
       - name: Check shell syntax
         if: runner.os != 'Windows'
-        run: for file in install.sh bin/* scripts/build-desktop-tray.sh packaging/homebrew/check-core-readiness.sh; do [ "$(head -n 1 "$file")" != '#!/bin/sh' ] || sh -n "$file"; done
+        run: for file in install.sh bin/* scripts/build-desktop-tray.sh scripts/check-glibc-floor.sh packaging/homebrew/check-core-readiness.sh; do [ "$(head -n 1 "$file")" != '#!/bin/sh' ] || sh -n "$file"; done
       - name: Check installer help
         if: runner.os != 'Windows'
         run: ./install.sh --help
@@ -120,9 +120,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          # The Linux companion links the build machine's glibc, and the newest
+          # runner image put a floor under the published binary that no user
+          # could clear: built on Ubuntu 24.04 it needs glibc 2.39, so it exits
+          # with `version 'GLIBC_2.39' not found` on Ubuntu 22.04, Debian 12 and
+          # every other still-supported older distribution. Building in a 22.04
+          # container lowers that floor to 2.35 independently of which image
+          # `ubuntu-latest` points at. 22.04 is as old as this can go: WebKitGTK
+          # 4.1, which Tauri 2 requires, is not packaged before it.
+          - os: ubuntu-latest
+            container: "ubuntu:22.04"
+          - os: windows-latest
     runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
     steps:
+      # The container is a bare image, so its build tools have to arrive before
+      # checkout: without git, actions/checkout silently falls back to a REST
+      # tarball, and the release job's `git archive` would have nothing to read.
+      - name: Install Linux desktop libraries
+        if: runner.os == 'Linux'
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential pkg-config file libssl-dev \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
@@ -130,17 +154,26 @@ jobs:
           cache: npm
           cache-dependency-path: apps/desktop/package-lock.json
       - name: Select stable Rust
+        if: runner.os != 'Linux'
         run: |
           rustup update stable
           rustup default stable
-      - name: Install Linux desktop libraries
+      # The image ships no rustup. `npm run check` runs cargo fmt, which the
+      # minimal profile omits, so ask for the component by name.
+      - name: Install stable Rust
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --default-toolchain stable --profile minimal --component rustfmt
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - run: npm ci --prefix apps/desktop
       - run: npm run check --prefix apps/desktop
       - run: npm run build:binary --prefix apps/desktop
+      - name: Check the published glibc floor
+        if: runner.os == 'Linux'
+        run: |
+          scripts/check-glibc-floor.sh \
+            apps/desktop/src-tauri/target/release/codex-router-desktop 2.35
       # The companion needs a Rust toolchain and a multi-minute compile, which
       # is a hard prerequisite for anyone who only wants to run it. This job
       # already produces exactly the binary they need and was discarding it, so
