@@ -41,7 +41,11 @@ function writeFakeGateway(directory, script) {
     `import { createServer } from "node:http";
 const args = process.argv.slice(2);
 const port = Number(args[args.indexOf("--port") + 1]);
-createServer((request, response) => {
+// LiteLLM's cold import does not listen while it runs, so a stand-in for a slow
+// start must not either: the probe has to be refused, not answered with an
+// error. Zero -- every other test -- still listens on the next tick.
+const readyAfter = Number(process.env.FAKE_GATEWAY_READY_AFTER_MS || 0);
+const server = createServer((request, response) => {
   const url = request.url || "";
   if (url.startsWith("/crash") || url.startsWith("/quit")) {
     response.writeHead(200).end("stopping");
@@ -53,7 +57,8 @@ createServer((request, response) => {
     return;
   }
   response.writeHead(200, { "content-type": "application/json" }).end('{"status":"healthy"}');
-}).listen(port, "127.0.0.1");
+});
+setTimeout(() => server.listen(port, "127.0.0.1"), readyAfter);
 `,
     { mode: 0o600 },
   );
@@ -278,6 +283,92 @@ test(
       // The point of restarting in place: the gateway was never touched, so
       // nobody paid its cold start.
       assert.doesNotMatch(errors, /LiteLLM gateway exited/);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await get(`http://127.0.0.1:${gatewayPort}/quit`);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      rmSync(rootDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+  },
+);
+
+// The reported outage: the router was started only after the gateway reported
+// healthy, and that wait is allowed to run for five minutes. Nothing listened
+// on the router port for any of it, so Codex was refused rather than answered
+// -- `stream closed before response.completed`, then reconnects failing with
+// `error sending request` -- while the control center blamed the router for a
+// gateway that was merely slow. The router handles an unreachable gateway
+// perfectly well on its own, so it no longer waits for one.
+test(
+  "the router serves while the gateway is still starting",
+  { timeout: 180_000 },
+  async () => {
+    const ports = await Promise.all(Array.from({ length: 5 }, () => freePort()));
+    const [routerPort, gatewayPort, oauthPort, apiPort, grokOauthPort] = ports;
+    const rootDir = mkdtempSync(path.join(os.tmpdir(), "model-router-slow-gateway-"));
+    const stateDir = path.join(rootDir, "state");
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    writeFileSync(path.join(stateDir, "internal-secret"), "slow-gateway-internal-key-with-sufficient-length\n", { mode: 0o600 });
+    writeFileSync(path.join(stateDir, "caller-secret"), "slow-gateway-caller-key-with-sufficient-length\n", { mode: 0o600 });
+    const gatewayBin = writeFakeGateway(rootDir, path.join(rootDir, "fake-gateway.mjs"));
+
+    const child = spawn(process.execPath, [path.join(root, "src", "start.mjs")], {
+      cwd: root,
+      env: {
+        ...process.env,
+        MODEL_ROUTER_TARGET: "codex",
+        MODEL_ROUTER_STATE_DIR: stateDir,
+        MODEL_ROUTER_PORT: String(routerPort),
+        MODEL_ROUTER_GATEWAY_PORT: String(gatewayPort),
+        MODEL_ROUTER_OAUTH_PORT: String(oauthPort),
+        MODEL_ROUTER_API_PORT: String(apiPort),
+        MODEL_ROUTER_GROK_OAUTH_PORT: String(grokOauthPort),
+        MODEL_ROUTER_LITELLM_BIN: gatewayBin,
+        // Long enough that a router still gated on it could not possibly be
+        // answering inside the assertion below.
+        FAKE_GATEWAY_READY_AFTER_MS: "15000",
+        CODEX_ROUTER_HOME: rootDir,
+        CODEX_HOME: rootDir,
+      },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let errors = "";
+    let exited;
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      errors += chunk;
+    });
+    child.once("exit", (code, signal) => {
+      exited = { code, signal };
+    });
+
+    const readExit = () => exited;
+    try {
+      await waitFor(
+        () => errors,
+        readExit,
+        /\[codex-router\] router is serving; waiting for the LiteLLM gateway/,
+        30_000,
+      );
+
+      // The ordering is the assertion, not a stopwatch: the router answers
+      // while the service is still waiting for the gateway.
+      assert.doesNotMatch(
+        errors,
+        /ready \(authenticated loopback endpoint\)/,
+        `the gateway was already up, so this proved nothing:\n${errors}`,
+      );
+      const degraded = await get(`http://127.0.0.1:${routerPort}/health`);
+      assert.equal(degraded.status, 503, `the router did not answer while the gateway was down:\n${errors}`);
+      const body = JSON.parse(degraded.body);
+      assert.equal(body.service, "codex-router");
+      assert.deepEqual(body.degraded, ["gateway"], degraded.body);
+
+      // And it converges: once the gateway answers, the same endpoint is 200.
+      await waitFor(() => errors, readExit, /ready \(authenticated loopback endpoint\)/, 60_000);
+      assert.equal((await get(`http://127.0.0.1:${routerPort}/health`)).status, 200, errors);
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
       await new Promise((resolve) => setTimeout(resolve, 500));

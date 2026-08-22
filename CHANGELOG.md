@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- **The router no longer waits for LiteLLM before it starts listening.** It was
+  spawned only after the gateway reported healthy, and that wait is allowed to
+  run for five minutes — so during every cold start, and permanently whenever
+  the gateway could not start at all, nothing listened on the router port and
+  every request was refused rather than answered. What that looked like was a
+  Codex turn ending in `stream closed before response.completed`, reconnects
+  failing with `error sending request`, and a control center reporting **Router:
+  Offline** next to a gateway still "waiting for health report" — the router
+  blamed for a gateway that was merely slow. Nothing required that order: the
+  router already reports `gateway.reachable: false`, answers `/health` with 503,
+  and translates a routed request into an upstream error naming the gateway.
+  Both now start together and the router's own health is awaited first, so a
+  slow or failed gateway costs a named error from a live router instead of a
+  dead port, and the control center points at the child that is actually down.
+  A gateway that never becomes healthy is still fatal to startup — the operator
+  has to see it — but clients no longer wait it out. `waitForHealth` gained
+  `acceptDegraded` for exactly this distinction: "is this process serving?" is
+  not "is everything it depends on up?".
+
 - **A router fault no longer ends the session.** The router was the one child
   whose death exited the whole service: the OS supervisor rebuilt everything,
   discarding a healthy gateway and paying LiteLLM's cold Python import, and for

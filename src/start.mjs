@@ -205,13 +205,22 @@ function waitForExit(child, label) {
 
 // The probe loop lives in src/health-probe.mjs so it can be tested directly;
 // importing this file starts the whole service pipeline.
-function waitForHealth(label, url, headers = {}, timeoutMs = 30_000, expectedService, child) {
+function waitForHealth(
+  label,
+  url,
+  headers = {},
+  timeoutMs = 30_000,
+  expectedService,
+  child,
+  { acceptDegraded = false } = {},
+) {
   return pollHealth({
     label,
     url,
     headers,
     timeoutMs,
     expectedService,
+    acceptDegraded,
     child,
     isShuttingDown: () => shuttingDown,
   });
@@ -308,11 +317,14 @@ async function main() {
       child,
     );
   const gateway = startGateway();
-  await gatewayHealthy(gateway);
 
   const frontend = FRONTEND;
   const frontendService = frontend.service;
   const startRouter = () => run(process.execPath, [path.join(SOURCE_ROOT, "src", frontend.script)]);
+  // `acceptDegraded`, because the router answers 503 while the gateway is
+  // unreachable and "the router is serving" is the only question this wait is
+  // asking. Without it the gate below would be the coupling again, wearing a
+  // different hat.
   const routerHealthy = (child) =>
     waitForHealth(
       frontend.label,
@@ -321,9 +333,35 @@ async function main() {
       30_000,
       frontendService,
       child,
+      { acceptDegraded: true },
     );
+  // The router used to be started only after the gateway reported healthy, and
+  // that wait is allowed to run for five minutes. For all of it -- and forever,
+  // when LiteLLM could not start at all -- nothing listened on the router port,
+  // so every Codex request was refused rather than answered. The user-visible
+  // shape is the one reported: a turn ending in `stream closed before
+  // response.completed`, reconnects failing with `error sending request`, and a
+  // control center showing the router Offline while the gateway is still
+  // "waiting for health report" -- which blames the router for a gateway that
+  // is merely slow.
+  //
+  // Nothing required that order. The router already handles an unreachable
+  // gateway: /health reports `gateway.reachable: false` and answers 503, and a
+  // routed request gets a translated upstream error naming the gateway. So both
+  // start together and the router's own health is awaited first. A slow gateway
+  // now costs a named error from a live router instead of a dead port, and the
+  // router is serving during LiteLLM's cold import rather than after it.
   const router = startRouter();
   await routerHealthy(router);
+  console.error(
+    `[${frontendService}] router is serving; waiting for the LiteLLM gateway. ` +
+      `Routed requests fail with an upstream error until it answers.`,
+  );
+  // Still fatal when it never arrives: a gateway that cannot start at all is a
+  // configuration or dependency failure, and the operator has to see it rather
+  // than have it retried behind a router that answers 503 forever. What changed
+  // is who waits -- the clients no longer do.
+  await gatewayHealthy(gateway);
 
   console.error(`[${frontendService}] ready (authenticated loopback endpoint)`);
   const supervisorLog = (message) => console.error(`[${frontendService}] ${message}`);

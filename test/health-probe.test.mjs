@@ -365,3 +365,60 @@ test("the frontend wait keeps checking that the right service answered", async (
   });
   assert.equal(answered, 3);
 });
+
+// Startup asks "is this process serving?", not "is everything it depends on
+// up?". The router answers 503 the whole time the gateway is unreachable, so a
+// strict `response.ok` here is what forced the router to be started only after
+// LiteLLM was healthy -- which left its port dead for the whole of a five
+// minute cold start, and permanently when the gateway could not start at all.
+test("a degraded service can satisfy the wait when the caller allows it", async () => {
+  const calls = [];
+  const fetchImpl = async () => {
+    calls.push("probe");
+    return jsonResponse({ service: "codex-router", ok: false, degraded: ["gateway"] }, 503);
+  };
+
+  await waitForHealth({
+    label: "Codex router",
+    url: URL_UNDER_TEST,
+    timeoutMs: 1_000,
+    expectedService: "codex-router",
+    acceptDegraded: true,
+    fetchImpl,
+  });
+  assert.equal(calls.length, 1, "a 503 that named the service was not accepted");
+});
+
+test("a degraded answer is still refused when the caller did not allow it", async () => {
+  const fetchImpl = async () =>
+    jsonResponse({ service: "codex-router", ok: false, degraded: ["gateway"] }, 503);
+
+  await assert.rejects(
+    waitForHealth({
+      label: "Codex router",
+      url: URL_UNDER_TEST,
+      timeoutMs: 300,
+      expectedService: "codex-router",
+      fetchImpl,
+    }),
+    /answered HTTP 503/,
+  );
+});
+
+// The allowance is for a dependency being down, not for the wrong process
+// answering on the port.
+test("acceptDegraded still requires the answer to identify the service", async () => {
+  const fetchImpl = async () => jsonResponse({ service: "something-else" }, 503);
+
+  await assert.rejects(
+    waitForHealth({
+      label: "Codex router",
+      url: URL_UNDER_TEST,
+      timeoutMs: 300,
+      expectedService: "codex-router",
+      acceptDegraded: true,
+      fetchImpl,
+    }),
+    /without identifying codex-router/,
+  );
+});

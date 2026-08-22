@@ -59,6 +59,16 @@ export async function waitForHealth({
   headers = {},
   timeoutMs = 30_000,
   expectedService,
+  // "Is this process serving?" and "is everything it depends on up?" are
+  // different questions, and only the first one gates a startup. The router
+  // answers /health with 503 whenever a dependency is unreachable, so a strict
+  // `response.ok` here means the router cannot be waited for until the gateway
+  // is healthy -- which is precisely the coupling that left nothing listening
+  // on the router port for the whole of a slow LiteLLM cold start. With this
+  // set, a body that identifies the expected service is accepted whatever the
+  // status: the dependency has its own row in doctor and in the control center,
+  // and a router that is up and degraded is not the same thing as no router.
+  acceptDegraded = false,
   child,
   fetchImpl = fetch,
   isShuttingDown = () => false,
@@ -112,6 +122,10 @@ export async function waitForHealth({
           const payload = await response.json().catch(() => ({}));
           if (payload.service === expectedService) return;
           lastFailure = `the health response did not identify ${expectedService}`;
+        } else if (acceptDegraded && expectedService) {
+          const payload = await response.json().catch(() => ({}));
+          if (payload.service === expectedService) return;
+          lastFailure = `the service answered HTTP ${response.status} without identifying ${expectedService}`;
         } else {
           await drainResponse(response);
           lastFailure = `the service answered HTTP ${response.status}`;

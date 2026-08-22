@@ -467,6 +467,18 @@ are one event: the router stopped serving mid-turn, so the open stream ended
 without its terminal event and every reconnect hit a port with nothing behind
 it.
 
+First check which child is actually down, because these used to look the same.
+**Router: Offline** beside a gateway "waiting for health report" was, until
+recently, usually a *gateway* problem: the router was not started until LiteLLM
+reported healthy, so a slow cold start — or one that never finished — left the
+router port dead and the router blamed for it. The router now starts alongside
+the gateway, so that state reads correctly: a live router with an unreachable
+gateway shows **Router: Degraded** and **Gateway: Offline**, `/health` answers
+503 with `degraded: ["gateway"]`, and routed requests fail with an upstream
+error that names the gateway instead of a refused connection. If the router row
+still says Offline, the router itself is the problem, and the rest of this
+section applies.
+
 The router is supervised in place. A crash is replaced within about a second,
 and a router that is alive but has stopped answering is probed, stopped, and
 replaced the same way — the gateway and forwarders are left running, so nobody
