@@ -170,11 +170,12 @@ Fedora uses `webkit2gtk4.1`, `libsoup3`, and `libappindicator-gtk3`; Arch uses
 `webkit2gtk-4.1`, `libsoup3`, and `libayatana-appindicator`.
 
 A dynamically linked binary carries the glibc symbol versions of the machine
-that built it. The Linux companion is built in an Ubuntu 22.04 container, so it
-needs **glibc 2.35 or newer** (Ubuntu 22.04+, Debian 12+, Fedora 36+, current
-Arch); CI asserts that floor with `scripts/check-glibc-floor.sh` so a moving
-build image cannot raise it unnoticed. 22.04 is as old as the base can go:
-WebKitGTK 4.1, which Tauri 2 requires, is not packaged before it.
+that built it. The Linux companion is built in an Ubuntu 22.04 container and
+supported on **glibc 2.35 or newer** (Ubuntu 22.04+, Debian 12+, Fedora 36+,
+current Arch). `scripts/check-glibc-floor.sh` asserts that ceiling after every
+build, so a moving base image cannot raise it unnoticed; the binary currently
+asks for 2.34, which RHEL and Rocky 9 also satisfy. 22.04 is as old as the base
+can go: WebKitGTK 4.1, which Tauri 2 requires, is not packaged before it.
 
 `v0.4.0-beta.4` and earlier were built on the then-current runner image and
 need **glibc 2.39** (Ubuntu 24.04+, Debian 13+). On an older host they exit

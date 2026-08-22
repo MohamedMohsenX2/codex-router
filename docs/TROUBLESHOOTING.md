@@ -77,9 +77,9 @@ Two failures are not fixable by installing packages:
 
 - `version 'GLIBC_2.39' not found` — `v0.4.0-beta.4` and earlier were built on
   the then-current Ubuntu LTS runner and need glibc 2.39 (Ubuntu 24.04+, Debian
-  13+). Later releases are built in an Ubuntu 22.04 container and need only
-  glibc 2.35, so upgrading the download is the fix. Hosts older than that —
-  RHEL and Rocky 9 ship glibc 2.34 — need one of the fallbacks below.
+  13+). Later releases are built in an Ubuntu 22.04 container and are supported
+  on glibc 2.35 and newer, so upgrading the download is the fix. Only a host
+  older than that — nothing still in general support — needs a fallback below.
 - `libwebkit2gtk-4.1.so.0: cannot open shared object file` after installing the
   packages above, on a distribution that packages only WebKitGTK 4.0. The
   companion uses the 4.1 (libsoup3) series and cannot load 4.0.
