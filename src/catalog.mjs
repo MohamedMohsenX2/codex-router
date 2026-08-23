@@ -726,8 +726,63 @@ function writeAnnouncedAt(announcedAt) {
   });
 }
 
+// Codex renders its picker by `priority`, not by the JSON array order. Keep
+// the vendor groups in one named policy so the file itself and the visible
+// picker agree. The three groups below are the operators' primary routes;
+// every other provider remains grouped deterministically after them.
+function pickerProviderGroup(provider) {
+  const value = String(provider || "");
+  if (value === "antigravity-oauth") return { rank: 0, key: "antigravity" };
+  if (value === "deepseek") return { rank: 1, key: "deepseek" };
+  // The opencode family shares one stored key: `opencode-go` and its variants
+  // (`opencode-go-messages`, `opencode-go-responses`, `opencode-zen`). Group
+  // them together so Zen models stay next to the Go models they relate to
+  // instead of falling into the rank-3 catch-all under their own key.
+  if (value.startsWith("opencode-go") || value === "opencode-zen") {
+    return { rank: 2, key: "opencode" };
+  }
+  return { rank: 3, key: value };
+}
+
+function pickerSlugGroup(slug) {
+  const value = String(slug || "");
+  if (!value.includes("/")) return { rank: -1, key: "native" };
+  return pickerProviderGroup(value.slice(0, value.indexOf("/")));
+}
+
+// Orders routed models for the picker by the vendor-group policy WITHOUT
+// rewriting each model's `priority`. The `priority` field feeds Codex's
+// spawn_agent override window (AGENTS.md step 5), where certified native v2
+// routes keep intentionally low values; renumbering every routed model to
+// nativeMax+1 would crowd those certified routes out of the window. Grouping
+// only reorders the published array while every model keeps its own priority.
+function routedPickerPriorities(nativeModels, routedModelsList) {
+  const groups = new Map();
+  for (const model of routedModelsList) {
+    const group = pickerProviderGroup(model.provider);
+    const key = `${group.rank}:${group.key}`;
+    if (!groups.has(key)) groups.set(key, { ...group, models: [] });
+    groups.get(key).models.push(model);
+  }
+
+  return [...groups.values()]
+    .sort((left, right) =>
+      left.rank - right.rank || left.key.localeCompare(right.key),
+    )
+    .flatMap((group) =>
+      group.models.sort((left, right) =>
+        Number(left.priority) - Number(right.priority) ||
+        String(left.slug).localeCompare(String(right.slug)),
+      ),
+    );
+}
+
 function sortCatalogModels(models) {
   return [...models].sort((left, right) => {
+    const leftGroup = pickerSlugGroup(left.slug);
+    const rightGroup = pickerSlugGroup(right.slug);
+    const group = leftGroup.rank - rightGroup.rank || leftGroup.key.localeCompare(rightGroup.key);
+    if (group) return group;
     const priority = Number(left.priority ?? 999) - Number(right.priority ?? 999);
     return priority || String(left.slug).localeCompare(String(right.slug));
   });
@@ -796,7 +851,7 @@ export function buildMergedCatalog(native, routedModelsList, { includeNative = t
       ? native.models.map((model) => [model.slug, normalizeNativeModel(model)])
       : [],
   );
-  for (const model of routedModelsList) {
+  for (const model of routedPickerPriorities(native.models, routedModelsList)) {
     const behaviorTemplate = behaviorTemplateFor(native.models, model, template);
     models.set(model.slug, routedModel(template, model, behaviorTemplate));
   }

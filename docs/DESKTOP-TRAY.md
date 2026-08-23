@@ -208,6 +208,31 @@ not a clean exit, so the tray returns at the next logon rather than reappearing
 immediately. Linux has no supervisor — launch it with `./bin/model-router-tray`
 — and the tray commands say so instead of reporting a silent success.
 
+On Windows the same `Codex Router Tray` task is also managed directly through
+the checkout wrapper, which owns the build step (`tray` builds then registers,
+`companion` falls back to the Electron shell when Cargo is not available):
+
+```powershell
+.\codex-router.ps1 tray status          # JSON: installed, loaded, supported, state
+.\codex-router.ps1 tray start          # ask Task Scheduler to run it now
+.\codex-router.ps1 tray stop
+.\codex-router.ps1 tray restart
+.\codex-router.ps1 tray uninstall      # remove the scheduled task
+.\codex-router.ps1 tray rebuild        # stop, rebuild, then re-register
+.\codex-router.ps1 tray repair         # fix task permissions, then reinstall the companion
+```
+
+`tray repair` fixes a `Codex Router Tray` task the current user cannot
+otherwise modify — the catch-22 a router reinstall fails with when an earlier
+elevated install left the task readable but not writable. It validates the
+task's principal, its logon type, and that its action is a genuine companion
+(recognized by shape, so repairing from a dev checkout whose task points at
+`%LOCALAPPDATA%\codex-router` is allowed), then performs a UAC-elevated DACL
+repair and finishes by rebuilding or reinstalling the companion. If you only
+meant to fix permissions, expect that reinstall to follow. When Task Scheduler
+cannot answer at all, `tray status` prints a JSON document with `"state":
+"unknown"` rather than failing the command.
+
 Windows 11 hides new tray icons in the `^` overflow next to the clock. Drag the
 icon onto the taskbar to pin it; an unpinned icon is the most common reason the
 companion looks like it never started.
