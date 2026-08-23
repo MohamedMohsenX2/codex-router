@@ -238,7 +238,14 @@ test(
       errors,
     );
     assert.doesNotMatch(errors, /LiteLLM gateway exited before becoming healthy/, errors);
-    assert.equal(exit.code, 1, errors);
+    // Non-zero rather than exactly 1: on Windows a failed startup can abort in
+    // libuv teardown with 0xC0000409 after naming the failure correctly, so the
+    // exit code is unreliable there (#370). What this test is about is that the
+    // gate does not turn a real failure into a silent skip, and the named error
+    // above proves that. Asserting the precise code would couple this test to a
+    // pre-existing teardown bug it is not exercising -- the same bug that makes
+    // devin-forwarder-gating.test.mjs flake on windows-latest.
+    assert.notEqual(exit.code, 0, errors);
   },
 );
 
