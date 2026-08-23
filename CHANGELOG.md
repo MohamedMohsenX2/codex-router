@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- **Antigravity OAuth routes Gemini models through a Google AI Pro/Ultra
+  account, and costs nothing to the installs that do not use it.** Sign-in is
+  the router's own browser authorization-code + PKCE flow rather than a vendor
+  CLI (`providers login antigravity-oauth`), and the session lives in the
+  router's owner-only state directory. Four integration seams are settled with
+  it. The provider's forwarder is spawned only when a session is stored, so an
+  operator who never signed in starts no extra child, binds no extra port, and
+  waits on no extra health probe -- it was previously launched unconditionally
+  on a fixed 127.0.0.1:4212, where a single port conflict took the gateway, the
+  router, the API forwarder and both other OAuth forwarders down with it.
+  The Google client secret is supplied through `ANTIGRAVITY_CLIENT_SECRET`,
+  which is now documented in README and `docs/INSTALL.md`, checked *before* the
+  authorization URL is printed or a browser opens rather than after consent has
+  already been granted, and written into the macOS, Linux, and Windows service
+  definitions so the background forwarder can still refresh a token an hour
+  later. Disconnecting any provider reports correctly again: the credential
+  removal used by `provider-key PROVIDER remove` became asynchronous with this
+  work, and the unawaited result had been reporting a deleted key file as one
+  that never existed, skipping the model-picker refresh, and -- the part that
+  mattered -- silently dropping the warning that the key still resolves from
+  the Keychain. Finally, `ANTIGRAVITY_REDIRECT_URI` is validated at first use
+  instead of at import, so a malformed value can no longer take down `doctor`,
+  `setup`, or `providers`.
+
 - **Curated OpenCode Zen free models now ship the effort ladder and context
   window OpenCode publishes for them, and say which values are still
   guesses.** Zen's anonymous `/models` endpoint returns ids and nothing else,

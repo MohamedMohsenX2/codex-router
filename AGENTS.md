@@ -1264,6 +1264,19 @@ about it.
    forwarder's actionable 401 naming `devin auth login` for a bare connection
    error. An unverified provider must stay free for the people not using it —
    apply the same rule to any future provider that needs its own forwarder.
+9. **The rule is the cost, not the curated model.** What must hold is that a
+   fourth forwarder costs nothing to the operators not using it; the curated
+   model is how Devin satisfies that, not the rule itself.
+   `antigravity-oauth` is the case where the two come apart: its models are
+   checked in rather than curated, so `MODELS` names the provider on every
+   install and would gate nothing. Its gate is the stored session
+   (`antigravityOAuthStatus().configured`), which is the equivalent answer
+   because sign-in is what makes those models reachable at all — `providers
+   enable antigravity-oauth` refuses to run before it and
+   `configuredProviderIds()` decides on that same status, so no picker can
+   offer a model whose port is unbound. A forwarder gated on a credential
+   appears only on the next service start, so the provider's sign-in command
+   has to say so rather than leaving the first routed turn to fail.
 
 ## Codex safety boundaries
 

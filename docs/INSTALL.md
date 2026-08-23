@@ -139,6 +139,14 @@ Antigravity OAuth uses a router-managed browser sign-in; it does not require a
 Gemini API key or a separate CLI. Sign in first, then enable the provider; the
 login command does not replace or disable any provider already selected.
 
+The build must supply the Google OAuth client secret in
+`ANTIGRAVITY_CLIENT_SECRET`; it is never bundled with the source, and the
+sign-in refuses to open a browser without it. Export it before signing in, and
+re-run the installer with it exported so the background service definition
+carries the same value -- launchd, systemd, and Task Scheduler do not inherit a
+shell, so a service installed without it signs in fine from a terminal and then
+fails its first token refresh about an hour later.
+
 macOS/Linux:
 
 ```sh
@@ -152,6 +160,10 @@ Windows PowerShell:
 .\model-router.ps1 codex providers login antigravity-oauth
 .\model-router.ps1 codex providers enable antigravity-oauth
 ```
+
+The Antigravity forwarder is spawned only when a session is stored, so restart
+the router service after the first sign-in (`./bin/control service restart`).
+An install that never signed in starts no extra child and binds no extra port.
 
 The access and refresh tokens are stored in the router's owner-only state
 directory and can be removed from the desktop connection panel. This is an

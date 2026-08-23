@@ -102,6 +102,11 @@ function knownLocalSecrets() {
     const value = readFileSync(target, "utf8").trim();
     if (value) values.add(value);
   }
+  // Not a provider credential and not stored in the state directory, but a
+  // working secret all the same, and one the service definition now carries so
+  // the background forwarder can refresh a token.
+  const clientSecret = process.env.ANTIGRAVITY_CLIENT_SECRET?.trim();
+  if (clientSecret) values.add(clientSecret);
   const oauthPath = antigravityTokenPath();
   if (existsSync(oauthPath)) {
     try {

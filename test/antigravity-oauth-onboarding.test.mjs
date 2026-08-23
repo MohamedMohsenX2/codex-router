@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -17,6 +18,8 @@ import {
   resolveAntigravityProject,
   signInAntigravity,
 } from "../src/antigravity-oauth-onboarding.mjs";
+
+const root = path.resolve(import.meta.dirname, "..");
 
 async function reserveLoopbackPort() {
   const server = net.createServer();
@@ -100,6 +103,40 @@ test("validates and derives the complete loopback callback target", () => {
       redirectUri: "http://localhost:54321/custom-callback",
     },
   );
+});
+
+test("a bad redirect URI cannot break an unrelated command at import", () => {
+  // This module is in the static import graph of doctor.mjs, setup.mjs and
+  // providers.mjs. Validating a top-level constant meant one malformed
+  // ANTIGRAVITY_REDIRECT_URI threw before any of those ran a line, so a
+  // misconfigured variable for one provider took down every other command.
+  // providers.mjs stands in for all of them: it reaches the constants through
+  // provider-onboarding.mjs and runs nothing of its own when it is imported
+  // rather than executed.
+  const directory = mkdtempSync(path.join(os.tmpdir(), "antigravity-redirect-import-"));
+  try {
+    const result = spawnSync(
+      process.execPath,
+      ["-e", "import('./src/providers.mjs').then(() => process.stdout.write('imported'))"],
+      {
+        cwd: root,
+        encoding: "utf8",
+        timeout: 60_000,
+        env: {
+          ...process.env,
+          MODEL_ROUTER_STATE_DIR: path.join(directory, "state"),
+          ANTIGRAVITY_REDIRECT_URI: "not a url",
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /imported/, result.stderr);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+
+  // The value is still refused, just at the point that uses it.
+  assert.throws(() => antigravityCallbackTarget("not a url"), /loopback URL/);
 });
 
 test("exchanges an authorization code for tokens", async () => {

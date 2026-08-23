@@ -267,6 +267,23 @@ On Windows PowerShell, use the matching wrapper:
 .\model-router.ps1 codex providers enable antigravity-oauth
 ```
 
+Signing in mints tokens against Google's OAuth client, so the build has to
+supply that client's secret in `ANTIGRAVITY_CLIENT_SECRET`. It is never bundled
+with the source. Export it before signing in, and re-run the installer with it
+exported so the background service is given the same value -- launchd, systemd,
+and Task Scheduler do not inherit a shell, and a service without the secret
+fails its first token refresh about an hour later:
+
+```sh
+export ANTIGRAVITY_CLIENT_SECRET=...
+./bin/model-router codex providers login antigravity-oauth
+```
+
+The forwarder that serves Antigravity models starts only when a session is
+stored, so restart the router service after the first sign-in
+(`./bin/control service restart`); until then nothing binds its port and an
+install that never signed in pays nothing for the provider.
+
 The credential stays in the router's owner-only state directory. This is an
 unofficial compatibility route over Google's internal Antigravity service,
 not a public Gemini API contract, so availability and wire behavior can change.

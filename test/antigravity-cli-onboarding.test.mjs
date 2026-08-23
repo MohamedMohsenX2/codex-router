@@ -90,6 +90,9 @@ test("providers login enters browser OAuth without changing provider selection",
       ["src/providers.mjs", "login", "antigravity-oauth"],
       isolatedEnvironment(testRoot, {
         ANTIGRAVITY_REDIRECT_URI: `http://127.0.0.1:${port}/oauth-callback`,
+        // The flow refuses to start without a client secret, and this case is
+        // about what happens after it starts. See the preflight test below.
+        ANTIGRAVITY_CLIENT_SECRET: "test-client-secret",
       }),
     );
     assert.equal(result.status, 1, result.stderr);
@@ -102,10 +105,52 @@ test("providers login enters browser OAuth without changing provider selection",
   }
 });
 
+test("sign-in refuses a missing client secret before any browser or URL", async () => {
+  // The secret is only needed at the token exchange, which is the far end of
+  // the flow. Without a preflight the operator gets the authorization URL, a
+  // browser, and a consent screen carrying five scopes -- and only then a
+  // generic "Sign-in failed" naming neither the cause nor the variable.
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "antigravity-cli-secret-"));
+  const stateDir = path.join(testRoot, "state");
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+
+  // Held open so the callback listener would collide with it. A flow that got
+  // as far as binding fails with EADDRINUSE instead, which is how "the
+  // preflight ran first" is asserted rather than assumed.
+  const occupied = net.createServer();
+  await new Promise((resolve, reject) => {
+    occupied.once("error", reject);
+    occupied.listen(0, "127.0.0.1", resolve);
+  });
+  const port = occupied.address().port;
+  try {
+    const result = runNode(
+      ["src/providers.mjs", "login", "antigravity-oauth"],
+      isolatedEnvironment(testRoot, {
+        ANTIGRAVITY_REDIRECT_URI: `http://127.0.0.1:${port}/oauth-callback`,
+        // Emptied rather than inherited: a developer with a real secret
+        // exported would otherwise skip this case entirely.
+        ANTIGRAVITY_CLIENT_SECRET: "",
+      }),
+    );
+
+    assert.equal(result.status, 1, result.stdout);
+    assert.match(result.stderr, /ANTIGRAVITY_CLIENT_SECRET/, result.stderr);
+    assert.doesNotMatch(result.stdout, /Open this URL to sign in to Antigravity/, result.stdout);
+    assert.doesNotMatch(result.stderr, /EADDRINUSE|address already in use/i, result.stderr);
+  } finally {
+    await new Promise((resolve) => occupied.close(resolve));
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
 test("installation docs publish working POSIX and PowerShell login commands", () => {
   for (const file of ["README.md", path.join("docs", "INSTALL.md")]) {
     const contents = readFileSync(path.join(root, file), "utf8");
     assert.match(contents, /\.\/bin\/model-router codex providers login antigravity-oauth/);
     assert.match(contents, /\.\\model-router\.ps1 codex providers login antigravity-oauth/);
+    // A required credential that is documented nowhere fails only after the
+    // operator has granted Google consent, so both guides have to name it.
+    assert.match(contents, /ANTIGRAVITY_CLIENT_SECRET/);
   }
 });

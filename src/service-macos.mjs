@@ -20,6 +20,7 @@ import {
   STATE_DIR,
   TARGET,
 } from "./paths.mjs";
+import { antigravityClientSecretEnvironment } from "./antigravity-oauth-constants.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
 import {
   skipServiceManagerCall,
@@ -85,6 +86,7 @@ function environmentEntries() {
     CODEX_ROUTER_PORT: String(PORTS.router),
     CODEX_ROUTER_API_PORT: String(PORTS.api),
     ...serviceProxyEnvironment(),
+    ...antigravityClientSecretEnvironment(),
     ...(process.env.CODEX_ROUTER_SOURCE_ROOT
       ? { CODEX_ROUTER_SOURCE_ROOT: SOURCE_ROOT }
       : {}),

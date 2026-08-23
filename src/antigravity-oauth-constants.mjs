@@ -12,9 +12,33 @@ export const ANTIGRAVITY_CLIENT_ID =
 export function requireAntigravityClientSecret() {
   const value = process.env.ANTIGRAVITY_CLIENT_SECRET;
   if (!value) {
-    throw new Error("Antigravity OAuth is not configured on this build.");
+    // Name the variable. Without it this arrives as "Sign-in failed" after the
+    // operator has already granted Google five scopes, or as a refresh failure
+    // inside the background service an hour later, and neither says what is
+    // missing or where to put it.
+    throw new Error(
+      "Antigravity OAuth is not configured on this build: ANTIGRAVITY_CLIENT_SECRET is not set. " +
+        "Set it in the environment before signing in, and re-run the installer so the background " +
+        "service is given the same value -- launchd, systemd, and Task Scheduler do not inherit a shell.",
+    );
   }
   return value;
+}
+
+// launchd, systemd, and Task Scheduler do not read a login shell, so every
+// service definition builds an explicit environment allowlist. The secret has
+// to be in it: without it a sign-in from a terminal succeeds and writes a
+// token, and then the forwarder running under the service throws on its first
+// refresh -- roughly an hour later, as a 502 with no obvious cause. The
+// definitions are owner-only files (mode 0600), the same protection the
+// proxy URLs beside it already rely on.
+//
+// An installer run that has no secret contributes no entry rather than an
+// empty one. Service definitions are rewritten wholesale on every install, so
+// re-running the installer without the variable is also how it is removed.
+export function antigravityClientSecretEnvironment(environment = process.env) {
+  const value = environment.ANTIGRAVITY_CLIENT_SECRET;
+  return value ? { ANTIGRAVITY_CLIENT_SECRET: value } : {};
 }
 
 export const ANTIGRAVITY_SCOPES = Object.freeze([
@@ -55,9 +79,16 @@ export function validateAntigravityRedirectUri(
   return url;
 }
 
-export const ANTIGRAVITY_REDIRECT_URI = validateAntigravityRedirectUri().toString();
+// Resolved on demand rather than at import. This module is in the static graph
+// of doctor.mjs, setup.mjs and providers.mjs, so validating a top-level
+// constant let one bad ANTIGRAVITY_REDIRECT_URI throw before any of those
+// commands ran a single line -- a misconfigured environment variable for one
+// provider taking down every unrelated command.
+export function antigravityRedirectUri() {
+  return validateAntigravityRedirectUri().toString();
+}
 
-export function antigravityCallbackTarget(value = ANTIGRAVITY_REDIRECT_URI) {
+export function antigravityCallbackTarget(value = antigravityRedirectUri()) {
   const url = validateAntigravityRedirectUri(value);
   return {
     host: url.hostname === "localhost"

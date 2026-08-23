@@ -19,6 +19,7 @@ import { waitForHealth as pollHealth } from "./health-probe.mjs";
 import { gatewaySupervisorLimits, superviseGateway } from "./gateway-supervisor.mjs";
 import { writeLiteLlmConfig } from "./litellm-config.mjs";
 import { MODELS } from "./model-registry.mjs";
+import { antigravityOAuthStatus } from "./antigravity-oauth-status.mjs";
 import { readLocalModelSelection } from "./local-models.mjs";
 import { spawnableCommand } from "./spawnable-command.mjs";
 import { ensureOllamaHeadless } from "./ollama-runtime.mjs";
@@ -113,6 +114,25 @@ if (readLocalModelSelection().enabled.length) {
 // naming that command, not a bare connection error from a port nobody is
 // listening on.
 const devinCliRouted = MODELS.some((model) => model.provider === "devin-cli");
+
+// Antigravity needs the same protection and cannot use the same gate. Its
+// models are checked in rather than curated, so `MODELS` always names the
+// provider and says nothing about whether anyone here uses it -- gating on it
+// would spawn the forwarder for every install, which is what put a fixed
+// 127.0.0.1:4212 bind on the startup path of people who never signed in. One
+// port conflict there took down the gateway, the router, the API forwarder and
+// both OAuth forwarders with it, because a forwarder that cannot listen exits
+// and its health wait aborts the whole service.
+//
+// The stored session is the gate instead, and for this provider it is the same
+// answer the curated model gives for Devin: sign-in is what makes an
+// Antigravity route reachable at all. `providers enable antigravity-oauth`
+// refuses to run before sign-in and `configuredProviderIds()` calls the
+// provider configured on this very status, so no picker can offer an
+// Antigravity model while this is false -- there is no route to strand. The
+// forwarder appears on the next service start after signing in, which is the
+// same reload a newly curated model needs.
+const antigravityOAuthRouted = antigravityOAuthStatus().configured;
 
 const commonEnv = {
   MODEL_ROUTER_TARGET: TARGET,
@@ -247,7 +267,9 @@ async function main() {
   const kimiForwarder = run(process.execPath, [path.join(SOURCE_ROOT, "src", "oauth-forwarder.mjs")]);
   const api = run(process.execPath, [path.join(SOURCE_ROOT, "src", "api-forwarder.mjs")]);
   const grokForwarder = run(process.execPath, [path.join(SOURCE_ROOT, "src", "grok-oauth-forwarder.mjs")]);
-  const antigravityForwarder = run(process.execPath, [path.join(SOURCE_ROOT, "src", "antigravity-oauth-forwarder.mjs")]);
+  const antigravityForwarder = antigravityOAuthRouted
+    ? run(process.execPath, [path.join(SOURCE_ROOT, "src", "antigravity-oauth-forwarder.mjs")])
+    : undefined;
   const devinForwarder = devinCliRouted
     ? run(process.execPath, [path.join(SOURCE_ROOT, "src", "devin-cli-forwarder.mjs")])
     : undefined;
@@ -276,14 +298,20 @@ async function main() {
       undefined,
       grokForwarder,
     ),
-    waitForHealth(
-      "Antigravity OAuth forwarder",
-      loopback(PORTS.antigravityOauth, "/health"),
-      { Authorization: `Bearer ${internalKey}` },
-      30_000,
-      undefined,
-      antigravityForwarder,
-    ),
+    // Same spread, same reason: an install with no Antigravity session waits on
+    // nothing, while one that has signed in waits on the forwarder by name.
+    ...(antigravityForwarder
+      ? [
+        waitForHealth(
+          "Antigravity OAuth forwarder",
+          loopback(PORTS.antigravityOauth, "/health"),
+          { Authorization: `Bearer ${internalKey}` },
+          30_000,
+          undefined,
+          antigravityForwarder,
+        ),
+      ]
+      : []),
     // Spread rather than a conditional inside the wait: an unrouted Devin adds
     // no entry at all, so it cannot add latency. A routed one is waited on
     // exactly as the other three are, and a forwarder that cannot bind still
@@ -348,7 +376,9 @@ async function main() {
     waitForExit(kimiForwarder, "OAuth forwarder"),
     waitForExit(api, "API forwarder"),
     waitForExit(grokForwarder, "Grok OAuth forwarder"),
-    waitForExit(antigravityForwarder, "Antigravity OAuth forwarder"),
+    ...(antigravityForwarder
+      ? [waitForExit(antigravityForwarder, "Antigravity OAuth forwarder")]
+      : []),
     // Only when it is actually running. A forwarder of ours that dies is a bug
     // report, and the rule above is that the service exits so the OS supervisor
     // rebuilds it -- leaving this one out of the race would instead strand a

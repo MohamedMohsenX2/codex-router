@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -190,6 +190,86 @@ raise SystemExit(os.waitstatus_to_exitcode(status))
     }
   },
 );
+
+// `removeApiCredential` became async when Antigravity's session file joined it.
+// Every other provider still takes the synchronous branch, so the deletion kept
+// happening -- only the *report* changed, into a Promise whose `removedFiles`
+// and `stillConfigured` both read as undefined. That silently turned a deleted
+// key file into "no managed key file exists", skipped the picker refresh, and
+// suppressed the warning that the credential still resolves from somewhere
+// else. These run the real CLI, because the dropped `await` was in its
+// top-level command handler and nothing importable covers it.
+function runProviderKey(testRoot, providerId, command) {
+  const stateDir = path.join(testRoot, "state");
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  return spawnSync(
+    process.execPath,
+    [path.join(root, "src", "provider-key.mjs"), providerId, command],
+    {
+      encoding: "utf8",
+      timeout: 60_000,
+      env: {
+        ...process.env,
+        HOME: testRoot,
+        CODEX_HOME: path.join(testRoot, "codex"),
+        MODEL_ROUTER_TARGET: "codex",
+        MODEL_ROUTER_STATE_DIR: stateDir,
+        CODEX_ROUTER_STATE_DIR: stateDir,
+        // The environment is not a persistent source, so it never reaches the
+        // report either way -- but an inherited key would still make the
+        // fixture depend on the machine running it.
+        DEEPSEEK_API_KEY: "",
+      },
+    },
+  );
+}
+
+test("removing a stored key reports the files it actually deleted", () => {
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-key-remove-"));
+  try {
+    const stateDir = path.join(testRoot, "state");
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    const keyPath = path.join(stateDir, "deepseek-api-key.secret");
+    writeFileSync(keyPath, "sk-provider-key-removal-fixture\n", { mode: 0o600 });
+
+    const result = runProviderKey(testRoot, "deepseek", "remove");
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(
+      result.stdout,
+      /Removed 1 managed DeepSeek API key file and disabled the provider\./,
+      result.stdout,
+    );
+    // The file is gone, so reporting that none existed is not a wording
+    // quibble: it tells the user the opposite of what happened.
+    assert.doesNotMatch(result.stdout, /No managed DeepSeek API key file exists\./, result.stdout);
+    assert.equal(existsSync(keyPath), false);
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
+test("removal still warns when the credential resolves from another source", () => {
+  // A keyless provider is the one non-Antigravity case whose credential still
+  // resolves after every managed file is deleted, on any host and without
+  // writing to a Keychain -- which is exactly the shape the warning exists for.
+  // The wording of the source is the provider's; what is asserted is that the
+  // sentence is printed at all, because the missing `await` dropped it
+  // entirely and a user who believes they disconnected was told nothing.
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-key-remaining-"));
+  try {
+    const result = runProviderKey(testRoot, "lmstudio", "remove");
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(
+      result.stdout,
+      /is still available from .+; remove it there to fully disconnect\./,
+      result.stdout,
+    );
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
 
 test("a catalog-only provider points the user at curation after a key is stored", () => {
   // gemini-api and the other catalog-only providers register zero models, so

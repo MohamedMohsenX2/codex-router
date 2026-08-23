@@ -100,6 +100,13 @@ async function main() {
         `${provider.displayName} sign-in completed. Run \`${providersCommand("enable", provider.id)}\` to add its models without changing any other provider.\n`,
       );
     }
+    // The forwarder that serves these models is spawned only when a session
+    // exists, so a router that started before this sign-in has none. Say so
+    // here rather than leaving the first routed turn to fail on a port nothing
+    // is listening on.
+    process.stdout.write(
+      "The Antigravity forwarder starts with the router service; run `./bin/control service restart` so it picks up this session.\n",
+    );
     return;
   }
   if (!provider || !["enable", "disable"].includes(command)) {

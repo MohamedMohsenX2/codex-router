@@ -266,7 +266,15 @@ if (command === "status") {
     // is no rollback of credential files, so a publication failure leaves the
     // coherent result (credential gone, provider disabled) rather than a
     // selection restored next to a deleted secret.
-    removal = removeApiCredential(provider.id);
+    //
+    // Awaited, because the answer is what the report below is made of.
+    // `removeApiCredential` became async for the Antigravity session file, and
+    // an unawaited Promise reads as an object with neither `removedFiles` nor
+    // `stillConfigured`: the picker refresh would be skipped, a deleted key
+    // file would be reported as one that never existed, and -- worst -- the
+    // warning that the credential still resolves from somewhere else would be
+    // suppressed for someone who believes they just disconnected.
+    removal = await removeApiCredential(provider.id);
     refreshed = removal.removedFiles ? refreshTargetPickerIfInstalled() : false;
   });
   process.stdout.write(

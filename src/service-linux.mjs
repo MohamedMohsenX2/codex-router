@@ -20,6 +20,7 @@ import {
   TARGET,
   TARGET_DISPLAY_NAME,
 } from "./paths.mjs";
+import { antigravityClientSecretEnvironment } from "./antigravity-oauth-constants.mjs";
 import { serviceProxyEnvironment } from "./proxy-environment.mjs";
 import { assertServiceWriteIsolated } from "./service-write-guard.mjs";
 
@@ -76,6 +77,7 @@ function unit() {
     CODEX_ROUTER_PORT: String(PORTS.router),
     CODEX_ROUTER_API_PORT: String(PORTS.api),
     ...serviceProxyEnvironment(),
+    ...antigravityClientSecretEnvironment(),
     ...(process.env.KIMI_CODE_HOME ? { KIMI_CODE_HOME: process.env.KIMI_CODE_HOME } : {}),
     ...(process.env.CODEX_ROUTER_SOURCE_ROOT
       ? { CODEX_ROUTER_SOURCE_ROOT: SOURCE_ROOT }

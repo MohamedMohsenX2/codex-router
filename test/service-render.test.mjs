@@ -170,6 +170,61 @@ test("background services preserve the installer's proxy environment", () => {
   }
 });
 
+test("background services carry the Antigravity client secret when one is set", () => {
+  // launchd, systemd, and Task Scheduler do not read a login shell, so a
+  // secret that is only exported in a terminal reaches the sign-in and not the
+  // forwarder: the token is written, and the background refresh throws about
+  // an hour later with nothing on screen to connect it to.
+  const testRoot = mkdtempSync(path.join(os.tmpdir(), "codex-router-antigravity-secret-"));
+  const secret = "test-only-antigravity-client-secret";
+  try {
+    const rendered = (script, platform, env) =>
+      serviceCommand(script, platform, testRoot, "render", "codex", root, env);
+
+    const launchd = rendered("service-macos.mjs", "darwin", {
+      ANTIGRAVITY_CLIENT_SECRET: secret,
+    });
+    assert.ok(
+      launchd.includes(
+        `<key>ANTIGRAVITY_CLIENT_SECRET</key>\n    <string>${launchdXml(secret)}</string>`,
+      ),
+      `launchd did not carry the Antigravity client secret:\n${launchd}`,
+    );
+
+    const systemd = rendered("service-linux.mjs", "linux", {
+      ANTIGRAVITY_CLIENT_SECRET: secret,
+    });
+    assert.ok(
+      systemd.includes(`Environment=${systemdQuoted(`ANTIGRAVITY_CLIENT_SECRET=${secret}`)}`),
+      `systemd did not carry the Antigravity client secret:\n${systemd}`,
+    );
+
+    const windows = rendered("service-windows.mjs", "win32", {
+      ANTIGRAVITY_CLIENT_SECRET: secret,
+    });
+    assert.ok(
+      windows.includes(`set "ANTIGRAVITY_CLIENT_SECRET=${secret}"`),
+      `the Task Scheduler wrapper did not carry the Antigravity client secret:\n${windows}`,
+    );
+
+    // Absent means absent. An installer run without the variable must write no
+    // entry at all rather than an empty one, which would look configured to
+    // every reader and fail only at the refresh.
+    for (const [script, platform] of [
+      ["service-macos.mjs", "darwin"],
+      ["service-linux.mjs", "linux"],
+      ["service-windows.mjs", "win32"],
+    ]) {
+      assert.doesNotMatch(
+        rendered(script, platform, { ANTIGRAVITY_CLIENT_SECRET: "" }),
+        /ANTIGRAVITY_CLIENT_SECRET/,
+      );
+    }
+  } finally {
+    rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
 test(
   "the generated systemd unit stays owner-only when it stores proxy settings",
   { skip: process.platform === "win32" },
