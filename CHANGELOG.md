@@ -26,6 +26,19 @@
   instead of at import, so a malformed value can no longer take down `doctor`,
   `setup`, or `providers`.
 
+- **Private state files are hardened with a canonical owner-only ACL on
+  Windows.** The previous Windows path asked `GetAccessControl` about the
+  file's existing DACL and then edited it with `SetAccessRuleProtection` and
+  `RemoveAccessRuleSpecific`, so a file whose DACL was already non-canonical
+  could make it throw (or silently keep foreign ACEs), the exact drift an
+  install or `doctor --fix` is meant to repair. Windows hardening now builds a
+  fresh, empty `FileSecurity`, replaces the DACL outright with a single
+  current-identity FullControl Allow rule and inheritance cleared, and skips
+  persisting owner/group so it needs only `WRITE_DAC` and cannot fail where an
+  `icacls /inheritance:r /grant:r` path would have succeeded. A hardening
+  failure now exits non-zero with the PowerShell diagnosis on stderr instead of
+  masquerading as success.
+
 - **MiniMax M3 no longer shows its chain of thought as assistant text.** The
   Token Plan route asked for adaptive thinking but not `reasoning_split`, so
   MiniMax embedded the reasoning in `content` as literal `<think>...</think>`

@@ -437,4 +437,8 @@ try {
     }
   }
 }
-process.exit(exitCode);
+// All children have exited, so let Node drain its own child-process bookkeeping
+// before terminating. A synchronous process.exit() here races libuv's Windows
+// async-handle close path and can abort with UV_HANDLE_CLOSING after a child
+// fails during startup (for example, an EADDRINUSE forwarder).
+process.exitCode = exitCode;
