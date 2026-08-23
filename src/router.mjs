@@ -16,6 +16,18 @@ import {
   callerBaseUrl,
   secretEqual,
 } from "./caller-auth.mjs";
+import {
+  CHECKPOINT_WARNING,
+  COMPACTION_PROMPT,
+  encodeCheckpoint,
+  finalizeCheckpoint,
+  isRouterCompactionValue,
+  LEGACY_V1_SUMMARY_PREFIX,
+  LEGACY_WARNING,
+  prepareCompaction,
+  renderCheckpoint,
+  renderCompactionValue,
+} from "./compaction-checkpoint.mjs";
 import { handlePanelRequest, isPanelRoute } from "./desktop-panel.mjs";
 import { handleGeminiRequest, isGeminiRoute } from "./gemini-surface.mjs";
 import {
@@ -299,13 +311,6 @@ const FORWARD_HEADERS = new Set([
   "x-openai-subagent",
   "x-responsesapi-include-timing-metrics",
 ]);
-
-const COMPACT_PROMPT = `You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary for another language model that will resume the task.
-
-Include current progress, key decisions, constraints, user preferences, remaining steps, and critical data or references. Be concise, structured, and focused on seamless continuation.`;
-const SUMMARY_PREFIX =
-  "Another language model started this task and produced a continuation summary. Use it to continue without repeating completed work:";
-const COMPACTION_PREFIX = "kcr1:";
 
 function parseBody(buffer) {
   try {
@@ -881,19 +886,6 @@ async function healthPayload() {
   };
 }
 
-function encodeSummary(summary) {
-  return COMPACTION_PREFIX + Buffer.from(summary, "utf8").toString("base64");
-}
-
-function decodeSummary(value) {
-  if (typeof value !== "string" || !value.startsWith(COMPACTION_PREFIX)) return undefined;
-  try {
-    return Buffer.from(value.slice(COMPACTION_PREFIX.length), "base64").toString("utf8");
-  } catch {
-    return undefined;
-  }
-}
-
 function messageItem(text) {
   return {
     type: "message",
@@ -908,12 +900,7 @@ function normalizeRoutedInput(input) {
     .filter((item) => item?.type !== "compaction_trigger")
     .map((item) => {
       if (item?.type !== "compaction") return item;
-      const summary = decodeSummary(item.encrypted_content);
-      return messageItem(
-        summary
-          ? `${SUMMARY_PREFIX}\n\n${summary}`
-          : "[Earlier conversation history was compacted in an unreadable format.]",
-      );
+      return messageItem(renderCompactionValue(item.encrypted_content));
     })
     .map((item) => {
       // LiteLLM rejects messages whose text content is empty; Codex emits
@@ -1668,10 +1655,9 @@ function normalizeNativeInput(input) {
   return input.map((item) => {
     if (item?.type === "reasoning") return sanitizeReasoningForNative(item);
     if (item?.type !== "compaction") return sanitizeCollaborationForNative(item);
-    const summary = decodeSummary(item.encrypted_content);
-    return summary === undefined
-      ? item
-      : messageItem(`${SUMMARY_PREFIX}\n\n${summary}`);
+    return isRouterCompactionValue(item.encrypted_content)
+      ? messageItem(renderCompactionValue(item.encrypted_content))
+      : item;
   });
 }
 
@@ -1692,50 +1678,107 @@ function extractUserMessages(input) {
       : typeof item.content === "string"
         ? item.content
         : "";
-    if (text.trim()) messages.push(text);
+    if (
+      text.trim() &&
+      !text.startsWith(CHECKPOINT_WARNING) &&
+      !text.startsWith(LEGACY_WARNING) &&
+      !text.startsWith(LEGACY_V1_SUMMARY_PREFIX)
+    ) {
+      messages.push(text);
+    }
   }
   return messages;
 }
 
 // The v1 compact response shape follows Codex's replacement-history contract.
-function compactOutput(input, summary) {
+function compactOutput(input, checkpoint) {
   const budget = 80_000;
   const selected = [];
   let remaining = budget;
-  const messages = extractUserMessages(input);
+  // Older requirements survive through bounded KCR2 evidence, not as stale
+  // ordinary messages that can be mistaken for the user's current request.
+  const messages = extractUserMessages(input).slice(-2);
   for (let index = messages.length - 1; index >= 0 && remaining > 0; index -= 1) {
     const value = messages[index];
     if (value.length <= remaining) {
       selected.push(value);
       remaining -= value.length;
     } else {
-      selected.push(value.slice(value.length - remaining));
+      // A message that does not fit is not replayed as an unmarked fragment
+      // that reads like a complete request. It is not lost either: it is
+      // retained inside the bounded checkpoint, flagged `truncated`.
       break;
     }
   }
   selected.reverse();
   return [
     ...selected.map(messageItem),
-    messageItem(summary.trim() ? `${SUMMARY_PREFIX}\n${summary}` : "(no summary available)"),
+    messageItem(renderCheckpoint(checkpoint)),
   ];
 }
 
-function extractResponseText(payload) {
-  if (typeof payload?.output_text === "string") return payload.output_text;
+// Output item types that are never the model's contract answer. Reasoning is
+// a draft the provider exposes separately; the rest are tool traffic. Naming
+// what to refuse -- rather than requiring `type === "message"` -- keeps a
+// routed provider whose Responses-shaped items omit `type` or carry a vendor
+// tag from silently contributing nothing to a compaction.
+const NON_ANSWER_OUTPUT_TYPES = new Set([
+  "reasoning",
+  "function_call",
+  "function_call_output",
+  "custom_tool_call",
+  "custom_tool_call_output",
+  "local_shell_call",
+  "local_shell_call_output",
+  "computer_call",
+  "computer_call_output",
+  "tool_search_call",
+  "tool_search_output",
+  "web_search_call",
+  "file_search_call",
+  "image_generation_call",
+  "code_interpreter_call",
+  "mcp_call",
+  "mcp_list_tools",
+  "mcp_approval_request",
+  "compaction",
+  "compaction_trigger",
+]);
+
+function outputItemText(item) {
   const text = [];
-  for (const item of Array.isArray(payload?.output) ? payload.output : []) {
-    for (const part of Array.isArray(item?.content) ? item.content : []) {
-      if (
-        ["output_text", "text"].includes(part?.type) &&
-        typeof part.text === "string"
-      ) {
-        text.push(part.text);
-      }
+  for (const part of Array.isArray(item?.content) ? item.content : []) {
+    if (
+      ["output_text", "text"].includes(part?.type) &&
+      typeof part.text === "string" &&
+      part.text.length > 0
+    ) {
+      text.push(part.text);
     }
   }
+  return text;
+}
+
+function extractResponseText(payload) {
+  if (typeof payload?.output_text === "string" && payload.output_text.length > 0) {
+    return payload.output_text;
+  }
+  const output = Array.isArray(payload?.output) ? payload.output : [];
+  // A provider that tags its answer is read strictly, so private reasoning is
+  // never mistaken for the final message.
+  const tagged = output
+    .filter((item) => item?.type === "message")
+    .flatMap(outputItemText);
+  if (tagged.length > 0) return tagged.join("\n");
+  // Otherwise fall back to any item that is not known tool or reasoning
+  // traffic, which is the only way a non-standard Responses shim contributes
+  // its answer at all.
+  const untagged = output
+    .filter((item) => !NON_ANSWER_OUTPUT_TYPES.has(item?.type))
+    .flatMap(outputItemText);
+  if (untagged.length > 0) return untagged.join("\n");
   const chatText = payload?.choices?.[0]?.message?.content;
-  if (typeof chatText === "string") text.push(chatText);
-  return text.join("\n");
+  return typeof chatText === "string" ? chatText : "";
 }
 
 // The models a compaction may be tried on, best first, without sending
@@ -1767,7 +1810,7 @@ function compactionAttempts(route, aged) {
 // here so a compaction can be moved to another model exactly like an ordinary
 // turn -- a compaction that fails ends the session just as hard, because the
 // conversation cannot get under its context limit without one.
-async function summarizeWith(request, payload, route, aged, signal) {
+async function summarizeWith(request, payload, route, aged, prepared, signal) {
   const compatibleInput = zenFreeCompatibleInput(aged.input, route);
   const providerInput = needsZenFreeToolCompatibility(route)
     ? bridgeCustomTools([], compatibleInput, new Map()).input
@@ -1785,7 +1828,11 @@ async function summarizeWith(request, payload, route, aged, signal) {
     // xAI rejects tool_choice "none" paired with it, so the field is omitted
     // rather than sent redundantly.
     tools: [],
-    input: [...bridged, messageItem(COMPACT_PROMPT)],
+    input: [
+      ...bridged,
+      messageItem(prepared.catalogText),
+      messageItem(COMPACTION_PROMPT),
+    ],
   };
   normalizeAutoToolChoice(body, route);
   delete body.previous_response_id;
@@ -1815,6 +1862,10 @@ async function summarize(request, payload, route, signal) {
   // is cached by ciphertext, so a conversation whose turns already resolved
   // costs nothing extra here.
   const normalized = await normalizeRoutedAgentInput(request, originalInput, signal);
+  // Evidence is extracted before tool-result aging rewrites old output bytes.
+  // The summarizer may select source IDs, but only this deterministic pass can
+  // decide which source types and machine outcomes enter a kcr2 checkpoint.
+  const prepared = prepareCompaction(normalized);
   const aged = ageToolResults(normalized, { enabled: toolResultAgingEnabled() });
 
   // The models this compaction may be moved to, in order, starting with the one
@@ -1827,7 +1878,7 @@ async function summarize(request, payload, route, signal) {
   let last;
   for (let index = 0; index < attempts.length; index += 1) {
     const attemptRoute = attempts[index];
-    const sent = await summarizeWith(request, payload, attemptRoute, aged, signal);
+    const sent = await summarizeWith(request, payload, attemptRoute, aged, prepared, signal);
     const bytes = Buffer.from(await sent.upstream.arrayBuffer());
     if (bytes.length > 32 * 1024 * 1024) {
       return {
@@ -1845,9 +1896,19 @@ async function summarize(request, payload, route, signal) {
     const usage = tokenUsageFromPayload(parsed);
     if (sent.upstream.ok) {
       clearProviderCooldown(attemptRoute.provider);
+      const answer = extractResponseText(parsed);
+      // finalizeCheckpoint turns empty model output into a structurally valid
+      // checkpoint, so an upstream whose answer this router cannot read would
+      // otherwise report ok with nothing in it. Say so where an operator sees
+      // it rather than shipping a silently empty summary.
+      if (!answer.trim() && !QUIET) {
+        console.error(
+          `[codex-router] compaction read no model text model=${attemptRoute.slug} provider=${canonicalProviderId(attemptRoute.provider)}`,
+        );
+      }
       return {
         ok: true,
-        summary: extractResponseText(parsed),
+        checkpoint: finalizeCheckpoint(answer, prepared),
         input: originalInput,
         usage,
         toolResultAging: aged.stats,
@@ -1892,6 +1953,29 @@ async function summarize(request, payload, route, signal) {
   return last && { ...last, failed };
 }
 
+function recordCompactionUsage(result, route, startedAt) {
+  const servedRoute = result?.route || route;
+  const failed = (result?.failed || []).filter((entry) => entry.route !== servedRoute);
+  for (const attempt of failed) {
+    recordUsageEvent({
+      model: attempt.route.slug,
+      provider: canonicalProviderId(attempt.route.provider),
+      status: attempt.status,
+      durationMs: Date.now() - startedAt,
+      ...attempt.usage,
+    });
+  }
+  recordUsageEvent({
+    model: servedRoute.slug,
+    provider: canonicalProviderId(servedRoute.provider),
+    status: result?.ok ? 200 : result?.status || 502,
+    durationMs: Date.now() - startedAt,
+    ...result?.usage,
+    ...result?.toolResultAging,
+    ...(result?.failoverFrom ? { failoverFrom: result.failoverFrom } : {}),
+  });
+}
+
 function compactionSnapshot(model, item, status = "completed") {
   return {
     id: `resp_${randomUUID().replaceAll("-", "")}`,
@@ -1904,11 +1988,11 @@ function compactionSnapshot(model, item, status = "completed") {
   };
 }
 
-function writeCompactionSse(response, model, summary) {
+function writeCompactionSse(response, model, checkpoint) {
   const item = {
     type: "compaction",
     id: `cmp_${randomUUID().replaceAll("-", "")}`,
-    encrypted_content: encodeSummary(summary),
+    encrypted_content: encodeCheckpoint(checkpoint),
   };
   const created = compactionSnapshot(model, undefined, "in_progress");
   const completed = { ...created, status: "completed", output: [item] };
@@ -1952,11 +2036,11 @@ async function handleRoutedCompaction(request, response, payload, route, signal,
       const item = {
         type: "compaction",
         id: `cmp_${randomUUID().replaceAll("-", "")}`,
-        encrypted_content: encodeSummary(result.summary),
+        encrypted_content: encodeCheckpoint(result.checkpoint),
       };
       writeJson(response, 200, compactionSnapshot(payload.model, item));
     } else {
-      writeCompactionSse(response, payload.model, result.summary);
+      writeCompactionSse(response, payload.model, result.checkpoint);
     }
     return {
       status: 200,
@@ -1965,7 +2049,7 @@ async function handleRoutedCompaction(request, response, payload, route, signal,
       ...served,
     };
   }
-  writeJson(response, 200, { output: compactOutput(result.input, result.summary) });
+  writeJson(response, 200, { output: compactOutput(result.input, result.checkpoint) });
   return {
     status: 200,
     usage: result.usage,
@@ -2534,31 +2618,8 @@ async function handleResponses(request, response, requestUrl) {
         controller.signal,
         compactV2,
       );
-      // Compaction used to return here without metering or logging, so neither
-      // a successful nor a failed one appeared anywhere in the router's own
-      // telemetry. Mirror the ordinary request path exactly.
       const compacted = compaction.route || route;
-      // A compaction the router moved was still charged by the provider that
-      // refused it, so each losing attempt gets its own row before the serving
-      // one -- the same shape the turn path records.
-      for (const attempt of compaction.failed || []) {
-        recordUsageEvent({
-          model: attempt.route.slug,
-          provider: canonicalProviderId(attempt.route.provider),
-          status: attempt.status,
-          durationMs: Date.now() - startedAt,
-          ...attempt.usage,
-        });
-      }
-      recordUsageEvent({
-        model: compacted.slug,
-        provider: canonicalProviderId(compacted.provider),
-        status: compaction.status,
-        durationMs: Date.now() - startedAt,
-        ...compaction.usage,
-        ...compaction.toolResultAging,
-        ...(compaction.failoverFrom ? { failoverFrom: compaction.failoverFrom } : {}),
-      });
+      recordCompactionUsage(compaction, route, startedAt);
       usage = compaction.usage;
       finalStatus = compaction.status;
       activityStatus = compaction.status;
