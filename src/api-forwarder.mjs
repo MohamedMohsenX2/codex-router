@@ -789,8 +789,25 @@ function normalizeBody(buffer, contentType, route) {
   } else if (model.requestProfile === "minimax-m3") {
     // MiniMax uses its own thinking control on the OpenAI-compatible
     // Chat Completions endpoint instead of reasoning_effort.
+    //
+    // Without `reasoning_split`, MiniMax embeds the chain of thought in
+    // `content` as literal <think>...</think> markup, so it renders as
+    // ordinary assistant text in any client that does not know the vendor
+    // format. With it, the reasoning arrives in `reasoning_content` -- which
+    // this router already relays as reasoning -- and `content` carries only
+    // the answer. A live probe against api.minimax.io confirmed both halves:
+    // HTTP 200 either way, `<think>` present in `content` without the flag and
+    // absent with it, alongside a populated `reasoning_content`.
+    //
+    // This is why there is no output filter here. Stripping the markup
+    // downstream means running a state machine over every streamed field, and
+    // the fields it would have to walk include tool-call argument deltas --
+    // where a patch that merely mentions <think> would be corrupted into
+    // invalid JSON. Fixing the leak at the source removes that whole class of
+    // failure instead of managing it.
     delete payload.reasoning_effort;
     payload.thinking = { type: "adaptive" };
+    payload.reasoning_split = true;
   } else if (model.requestProfile === "auto-tool-choice") {
     // Some models call tools happily under "auto" but reject being forced to,
     // the way DeepSeek and Qwen do in thinking mode. Their vendor profiles

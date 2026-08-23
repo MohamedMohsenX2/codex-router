@@ -454,6 +454,26 @@ test("preload constructs exact positional IPC payloads", async () => {
   assert.equal(calls.length, 0);
 });
 
+// The Control Center and the tray render the same health report through two
+// separate implementations, so the pair has to be checked, not just one half
+// (#366). apps/desktop/ui/model.mjs is exercised directly in
+// test/desktop-ui.test.mjs; this is the TypeScript twin.
+test("the control center health rows match the tray's on absent and Grok dependencies", async () => {
+  const source = await readFile(new URL("../apps/control-center/src/service-health.ts", import.meta.url), "utf8");
+
+  // A router that answered `ok` has already probed every dependency it knows
+  // about, so an id missing from `degraded` is Ready rather than Unknown.
+  assert.match(source, /routerOk\?: boolean/);
+  assert.match(source, /if \(!offline && routerOk === true\) \{[\s\S]*?state: "ready"/);
+  assert.match(source, /dependencyRow\("gateway", "Gateway", health\?\.gateway, degraded, routerOk\)/);
+
+  // The Grok OAuth forwarder is a fifth local port with its own probe, and
+  // both surfaces enumerate forwarders explicitly, so it has to be listed.
+  assert.match(source, /\["grokOauth", "Grok OAuth forwarder"\]/);
+  const types = await readFile(new URL("../apps/control-center/src/types.ts", import.meta.url), "utf8");
+  assert.match(types, /grokOauth\?: RouterServiceHealth;/);
+});
+
 test("control center sidebar keeps the requested product order", async () => {
   const source = await readFile(new URL("../apps/control-center/src/App.tsx", import.meta.url), "utf8");
   const navBlock = source.match(/const NAV_ITEMS:[\s\S]*?= \[([\s\S]*?)\n\];/)?.[1];

@@ -133,6 +133,7 @@ test("router health waits for enabled dependencies and ignores disabled forwarde
     CODEX_ROUTER_SHOW_ALL_MODELS: "0",
     CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${healthy.port}/oauth-health`,
     CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${unavailableApiPort}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${healthy.port}/grok-health`,
     CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${healthy.port}/gateway-health`,
     CODEX_ROUTER_QUIET: "1",
   });
@@ -145,6 +146,74 @@ test("router health waits for enabled dependencies and ignores disabled forwarde
     await stopChild(router);
     await closeServer(healthy.server);
     rmSync(testRoot, { recursive: true, force: true });
+  }
+});
+
+// The Grok OAuth forwarder listens on its own port and was the one forwarder
+// nothing probed, so the router could answer `ok` with it dead (#366). It is
+// gated on the provider the way the Kimi OAuth forwarder is, because probing a
+// port an operator never routes through is noise, not a signal.
+test("the Grok OAuth forwarder is probed only when its provider is enabled", async () => {
+  const grokProbes = [];
+  const healthy = await mockServer((request, response) => {
+    if (request.url === "/grok-health") grokProbes.push(request.url);
+    json(response, 200, { ok: true, credential_present: true });
+  });
+
+  const readHealth = async (providers, grokHealthUrl) => {
+    const testRoot = mkdtempSync(path.join(os.tmpdir(), "router-grok-health-"));
+    writeFileSync(
+      path.join(testRoot, "enabled-providers.json"),
+      `${JSON.stringify({ version: 1, providers })}\n`,
+      { mode: 0o600 },
+    );
+    const routerPort = await openPort();
+    const router = run("router.mjs", {
+      CODEX_ROUTER_PORT: String(routerPort),
+      CODEX_ROUTER_STATE_DIR: testRoot,
+      CODEX_ROUTER_SHOW_ALL_MODELS: "0",
+      CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${healthy.port}/oauth-health`,
+      CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${healthy.port}/api-health`,
+      CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: grokHealthUrl,
+      CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${healthy.port}/gateway-health`,
+      CODEX_ROUTER_QUIET: "1",
+    });
+    try {
+      // Readiness is taken from `/models`, not `/health`: the last case here
+      // is a router that is deliberately degraded, and `/health` answers 503
+      // for exactly that.
+      await waitFor(`${routerBase(routerPort)}/models`, router);
+      return await (await fetch(`${routerBase(routerPort)}/health`)).json();
+    } finally {
+      await stopChild(router);
+      rmSync(testRoot, { recursive: true, force: true });
+    }
+  };
+
+  const deadGrokPort = await openPort();
+  try {
+    const unselected = await readHealth(["deepseek"], `http://127.0.0.1:${deadGrokPort}/health`);
+    // Nothing was dialled, so a forwarder nobody routes through cannot drag
+    // the router into `degraded` -- it reports standby exactly as a disabled
+    // Kimi OAuth forwarder does.
+    assert.deepEqual(unselected.grokOauth, { reachable: true, enabled: false });
+    assert.deepEqual(unselected.degraded, []);
+    assert.equal(unselected.ok, true);
+    assert.deepEqual(grokProbes, []);
+
+    const selected = await readHealth(["grok-oauth"], `http://127.0.0.1:${healthy.port}/grok-health`);
+    assert.equal(selected.grokOauth.reachable, true);
+    assert.equal(selected.ok, true);
+    assert.ok(grokProbes.length >= 1, JSON.stringify(grokProbes));
+
+    // ...and a selected forwarder that is down is named, rather than hidden
+    // behind an `ok` the operator would have believed.
+    const down = await readHealth(["grok-oauth"], `http://127.0.0.1:${deadGrokPort}/health`);
+    assert.deepEqual(down.grokOauth, { reachable: false });
+    assert.deepEqual(down.degraded, ["grokOauth"]);
+    assert.equal(down.ok, false);
+  } finally {
+    await closeServer(healthy.server);
   }
 });
 
@@ -182,6 +251,7 @@ test("router requires the configured path capability before any model route", as
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
     CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_SESSION_INDEX: sessionIndex,
     CODEX_ROUTER_QUIET: "1",
@@ -317,7 +387,8 @@ test("router requires the configured path capability before any model route", as
     // three fixed local service names -- never a URL, a credential, or the
     // per-service payloads the protected leaf carries.
     assert.ok(
-      publicPayload.degraded.every((name) => ["oauth", "api", "gateway"].includes(name)),
+      publicPayload.degraded.every((name) =>
+        ["oauth", "api", "grokOauth", "gateway"].includes(name)),
       JSON.stringify(publicPayload.degraded),
     );
     assert.equal(publicPayload.activity.state, "error");
@@ -357,6 +428,7 @@ test("a canceled request does not flip activity into the error state", async () 
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
     CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_QUIET: "1",
   });
@@ -3368,6 +3440,11 @@ test("API forwarder routes MiniMax M3 streaming tool calls with adaptive thinkin
     assert.equal(request.body.stream, true);
     assert.equal(request.body.reasoning_effort, undefined);
     assert.deepEqual(request.body.thinking, { type: "adaptive" });
+    // Without this, MiniMax returns the chain of thought inline in `content`
+    // as literal <think>...</think> markup. Verified against api.minimax.io:
+    // the same prompt leaks `<think>` into `content` without the flag and
+    // carries a populated `reasoning_content` with it.
+    assert.equal(request.body.reasoning_split, true);
     assert.equal(request.body.tools[0].function.name, "get_weather");
     assert.deepEqual(request.body.tools[0].function.parameters.required, ["city"]);
   } finally {
@@ -5589,6 +5666,7 @@ test("a live child turn refines a legacy experimental subagent diagnostic", asyn
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
     CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     MODEL_ROUTER_SUBAGENT_PROOFS: proofsPath,
     CODEX_ROUTER_QUIET: "1",
@@ -5693,6 +5771,7 @@ test("ordinary child traffic does not mutate a legacy local proven record", asyn
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
     CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     MODEL_ROUTER_SUBAGENT_PROOFS: proofsPath,
     // Thread identity resolves against rollout files; point it at empty state
@@ -5798,6 +5877,7 @@ test("a subagent effort reaches child turns and leaves parent turns alone", asyn
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
     CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_QUIET: "1",
   });
@@ -5889,6 +5969,7 @@ test("a subagent effort overrides the effort Codex nested in the reasoning objec
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
     CODEX_ROUTER_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_QUIET: "1",
   });
@@ -6253,6 +6334,7 @@ test("router repairs malformed Z.ai message envelopes after LiteLLM Responses tr
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
     CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_QUIET: "1",
   });
   try {
@@ -6686,6 +6768,7 @@ test("Zen Free Muse and Ox bridge custom tools across JSON, history, SSE, and er
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
     CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     XAI_API_KEY: "TEST_XAI_API_KEY",
     CODEX_ROUTER_QUIET: "1",
   });
@@ -7036,6 +7119,7 @@ test("Go, paid Zen, and other Free routes keep compatibility-sensitive wire shap
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
     CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_QUIET: "1",
   });
   const recursiveSchema = {
@@ -7188,6 +7272,7 @@ test("canceling a Zen Free Ox custom-tool stream stops the transformed pipeline"
     CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
     CODEX_ROUTER_GATEWAY_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_API_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
+    CODEX_ROUTER_GROK_OAUTH_HEALTH_URL: `http://127.0.0.1:${gateway.port}/health`,
     CODEX_ROUTER_QUIET: "1",
   });
   try {

@@ -106,8 +106,9 @@ test("the default window is short enough for a live status display", () => {
 
 test("the router probes through the cache, not around it", () => {
   const router = readFileSync(path.join(root, "src", "router.mjs"), "utf8");
-  // healthPayload calls serviceHealth three times per request; if that ever
-  // goes straight to the network again the probe flood comes back silently.
+  // healthPayload calls serviceHealth up to four times per request; if that
+  // ever goes straight to the network again the probe flood comes back
+  // silently.
   assert.match(router, /const healthCache = createHealthCache\(\{\s*staleWhileRevalidate:\s*true\s*\}\)/);
   assert.match(router, /function serviceHealth\(url\)\s*\{\s*return healthCache\(url,/);
   assert.match(router, /loopbackProbeFetch\(/);

@@ -437,6 +437,7 @@ export interface RouterHealth {
   gateway?: RouterServiceHealth;
   oauth?: RouterServiceHealth;
   api?: RouterServiceHealth;
+  grokOauth?: RouterServiceHealth;
   activity?: {
     state?: "idle" | "starting" | "generating" | "error" | "offline" | string;
     activeCount?: number;

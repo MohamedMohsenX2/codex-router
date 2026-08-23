@@ -216,6 +216,57 @@ test("service health rows expose enabled dependencies without leaking endpoint d
   );
 });
 
+// A router that answered `ok` has already probed every dependency it knows
+// about, so a missing per-service key is silence about a service that passed,
+// not silence about a service nobody asked. Rendering it as Unknown made a
+// perfectly healthy install look like it had never reported.
+test("a dependency absent from a healthy report is inferred ready rather than unknown", () => {
+  const [, gateway] = serviceHealthRows({ ok: true, degraded: [] });
+  assert.deepEqual(gateway, {
+    id: "gateway",
+    label: "Gateway",
+    state: "ready",
+    status: "Ready",
+    detail: "Reachable",
+  });
+  // The inference is only ever drawn from a report that says so. An `ok` that
+  // names the dependency is still Offline, and no report at all is still
+  // Unknown.
+  assert.equal(serviceHealthRows({ ok: true, degraded: ["gateway"] })[1].state, "offline");
+  assert.equal(serviceHealthRows({ ok: false, degraded: [] })[1].state, "unknown");
+  assert.equal(serviceHealthRows(undefined)[1].state, "unknown");
+});
+
+// The Grok OAuth forwarder is a fifth local port with a health probe of its
+// own (#366). The tray enumerates forwarders explicitly, so a key nobody
+// listed would be dropped on the floor rather than rendered.
+test("the Grok OAuth forwarder is rendered alongside the other forwarders", () => {
+  assert.deepEqual(
+    serviceHealthRows({
+      ok: false,
+      degraded: ["grokOauth"],
+      gateway: { reachable: true },
+      grokOauth: { reachable: false, enabled: true },
+    }).map((row) => row.id),
+    ["router", "gateway", "grokOauth"],
+  );
+  assert.deepEqual(
+    serviceHealthRows({
+      ok: true,
+      degraded: [],
+      gateway: { reachable: true },
+      grokOauth: { reachable: true, enabled: false },
+    }).at(-1),
+    {
+      id: "grokOauth",
+      label: "Grok OAuth forwarder",
+      state: "standby",
+      status: "Standby",
+      detail: "Not enabled",
+    },
+  );
+});
+
 // src/tool-result-aging-state.mjs defaults the feature off when no state file
 // exists, so an absent snapshot has to render off. Rendering on told every
 // fresh install that ageing was happening when nothing was.

@@ -273,6 +273,19 @@ beside ours, so everything else in them is somebody else's work.
    lines. `test/dsh-config-manager.test.mjs` asserts both properties against a
    document that has work of somebody else's in every position the router
    writes near; do not weaken them.
+   The credentials document comes in two shapes: current harness builds wrap
+   the reference map in a `version`/`refs` envelope, older ones kept it at the
+   document root. Both are written in place and neither is converted into the
+   other, because the shape belongs to the harness build that reads the file.
+   `refs` present settles it; `version` without `refs` settles it the other
+   way, since that is a current harness on its first install — the case where
+   guessing wrong is silent, because the harness resolves `apiKeyEnv` under
+   `refs` and a key one level too high 401s with no diagnostic. `status()`
+   resolves the credential through that same decision, so it can never report
+   one the harness cannot read, and a new reference takes its indentation from
+   a sibling rather than from the `refs:` key's own column — a mixed-indent
+   block is not YAML any parser reads back, and this file holds every adapter's
+   key.
 2. **Refuse rather than guess.** `src/yaml-structure.mjs` is a fail-closed
    structural lexer for block-mapping YAML, not a general YAML parser. A
    document it cannot read plainly — a tab indent, a multi-document stream, a

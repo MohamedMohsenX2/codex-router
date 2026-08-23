@@ -154,6 +154,9 @@ const API_HEALTH =
   process.env.CODEX_ROUTER_API_HEALTH_URL ||
   process.env.KIMI_API_HEALTH_URL ||
   loopback(PORTS.api, "/health");
+const GROK_OAUTH_HEALTH =
+  process.env.CODEX_ROUTER_GROK_OAUTH_HEALTH_URL ||
+  loopback(PORTS.grokOauth, "/health");
 const GATEWAY_HEALTH =
   process.env.CODEX_ROUTER_GATEWAY_HEALTH_URL ||
   process.env.KIMI_GATEWAY_HEALTH_URL ||
@@ -837,21 +840,29 @@ async function healthPayload() {
   const apiEnabled = [...PROVIDERS.values()].some(
     (provider) => enabled.has(provider.id) && provider.kind === "openai-compatible",
   );
-  const [oauth, api, gateway] = await Promise.all([
+  const [oauth, api, grokOauth, gateway] = await Promise.all([
     enabled.has("kimi-oauth")
       ? serviceHealth(OAUTH_HEALTH)
       : { reachable: true, enabled: false },
     apiEnabled ? serviceHealth(API_HEALTH) : { reachable: true, enabled: false },
+    // The Grok OAuth forwarder is started unconditionally but is only a real
+    // dependency for an operator who selected the provider, so it is gated the
+    // way the Kimi OAuth forwarder is: an unselected provider reports standby
+    // rather than being probed on a port nobody routes through.
+    enabled.has("grok-oauth")
+      ? serviceHealth(GROK_OAUTH_HEALTH)
+      : { reachable: true, enabled: false },
     serviceHealth(GATEWAY_HEALTH),
   ]);
   // Naming the unreachable dependency is the difference between "the router is
   // broken" and "the gateway is restarting". It costs nothing to carry: these
-  // are three fixed local service names, so it is safe on the unauthenticated
+  // are four fixed local service names, so it is safe on the unauthenticated
   // leaf too, which is the only one `waitForRouterHealth` and therefore doctor
   // can read.
   const degraded = [
     ["oauth", oauth],
     ["api", api],
+    ["grokOauth", grokOauth],
     ["gateway", gateway],
   ]
     .filter(([, service]) => !service.reachable)
@@ -865,6 +876,7 @@ async function healthPayload() {
     activity: activityPayload(),
     oauth,
     api,
+    grokOauth,
     gateway,
   };
 }

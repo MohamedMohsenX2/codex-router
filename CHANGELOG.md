@@ -26,6 +26,54 @@
   instead of at import, so a malformed value can no longer take down `doctor`,
   `setup`, or `providers`.
 
+- **MiniMax M3 no longer shows its chain of thought as assistant text.** The
+  Token Plan route asked for adaptive thinking but not `reasoning_split`, so
+  MiniMax embedded the reasoning in `content` as literal `<think>...</think>`
+  markup, which every client that does not know the vendor format rendered as
+  ordinary output. Requesting the split moves it to `reasoning_content`, which
+  this router already relays as reasoning. Verified against api.minimax.io: the
+  same prompt leaks `<think>` into `content` without the flag and carries a
+  populated `reasoning_content` with it. Reported in #333 by @moryk87.
+
+- **The harness caller key is written where a current harness reads it.**
+  DeepSeek Harness moved `.credentials.yaml` to a `version`/`refs` envelope
+  around the reference map, and the router only knew the flat root map the
+  older builds used -- so on a current harness it wrote `CODEX_ROUTER_CALLER_KEY`
+  one level too high, the harness resolved the route's `apiKeyEnv` under `refs`,
+  found nothing, and every turn came back 401 with no diagnostic anywhere
+  (reported in #351 by @jepgambardella). Both shapes are now written in place,
+  and neither is converted into the other: `refs` present settles it, `version`
+  without `refs` settles it the other way -- that is a current harness on its
+  first install, the case where guessing wrong is silent -- and a document with
+  no references at all adopts the current shape. A new reference follows the
+  indentation the envelope already uses for its siblings rather than assuming
+  two spaces, since a mixed-indent block is not YAML any parser reads back and
+  the file holds every adapter's key, not only ours. Removing the reference
+  prunes a `refs:` it emptied, exactly as removing the route prunes an emptied
+  `providers:`, so uninstall restores the document byte for byte. `status`
+  resolves the credential through the same decision the writer makes, so it can
+  no longer report one the harness cannot read. A reference an older build left
+  at the root of an enveloped document is moved rather than copied, so uninstall
+  no longer leaves a second copy of the caller key behind. Anything that is not
+  a reference map in either shape -- a nested mapping at the root, a nested
+  mapping inside `refs`, an inline `refs` -- is still refused with the file
+  untouched.
+
+- **The Grok OAuth forwarder is health-checked, and a dependency the router
+  did not name is no longer reported as unknown.** `/health` probed the Kimi
+  OAuth forwarder, the API forwarder, and the gateway, but never the Grok
+  OAuth forwarder on its own port -- so an operator routing through Grok OAuth
+  got no signal for it at all and the router could answer `ok` with that
+  forwarder dead (issue #366). It is now probed like the others, gated on the
+  `grok-oauth` provider actually being selected so an unused port is never
+  dialled, named as `grokOauth` in `degraded` when it is down, and carried
+  through the redacted health projection into the tray and the Control Center,
+  which both render it beside the other forwarders. Separately, both surfaces
+  fell through to "Unknown / Waiting for health report" whenever a service key
+  was simply absent from the payload; a router that reported `ok` has already
+  probed every dependency it knows about, so an id missing from `degraded` now
+  renders Ready and a healthy install stops looking like it never answered.
+
 - **Curated OpenCode Zen free models now ship the effort ladder and context
   window OpenCode publishes for them, and say which values are still
   guesses.** Zen's anonymous `/models` endpoint returns ids and nothing else,

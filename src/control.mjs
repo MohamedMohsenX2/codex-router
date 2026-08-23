@@ -2576,6 +2576,7 @@ async function printHealth() {
       ...(safeService(body.gateway) ? { gateway: safeService(body.gateway) } : {}),
       ...(safeService(body.oauth) ? { oauth: safeService(body.oauth) } : {}),
       ...(safeService(body.api) ? { api: safeService(body.api) } : {}),
+      ...(safeService(body.grokOauth) ? { grokOauth: safeService(body.grokOauth) } : {}),
     })}\n`);
   } catch (error) {
     process.stdout.write(`${JSON.stringify({

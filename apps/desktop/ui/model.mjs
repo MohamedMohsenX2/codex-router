@@ -234,6 +234,17 @@ export function observedModelSpeed(providerUsage, providerId, modelSlug) {
     : null;
 }
 
+// The dependencies the router reports on, in render order. The Grok OAuth
+// forwarder is a fifth local port with its own probe, so it belongs here
+// alongside the other two forwarders rather than being reported by nobody.
+const SERVICE_ROWS = [
+  ["gateway", "Gateway"],
+  ["oauth", "OAuth forwarder"],
+  ["api", "API forwarder"],
+  ["grokOauth", "Grok OAuth forwarder"],
+];
+const FORWARDER_IDS = new Set(["oauth", "api", "grokOauth"]);
+
 // Keep the tray's health language deliberately small. The router endpoint
 // already tells us which local dependency is reachable; this helper turns
 // that payload into rows the compact status view can scan at a glance.
@@ -257,29 +268,35 @@ export function serviceHealthRows(health) {
           : "Health endpoint unavailable",
   }];
 
-  for (const [id, label] of [["gateway", "Gateway"], ["oauth", "OAuth forwarder"], ["api", "API forwarder"]]) {
+  for (const [id, label] of SERVICE_ROWS) {
     const service = health?.[id];
     const shouldShow = id === "gateway" || Boolean(service) || degraded.has(id);
     if (!shouldShow) continue;
+    // An absent per-service payload is not the same as no information: a
+    // router that reported `ok` has already probed every dependency it knows
+    // about, so an id missing from `degraded` is reachable. Rendering it as
+    // Unknown made a healthy install look like it had never answered. Kept in
+    // step with apps/control-center/src/service-health.ts.
+    const inferredReady = !service && health?.ok === true && !degraded.has(id);
     rows.push({
       id,
       label,
       state: !hasHealth || !service
-        ? degraded.has(id) ? "offline" : "unknown"
+        ? degraded.has(id) ? "offline" : inferredReady ? "ready" : "unknown"
         : service.enabled === false && !degraded.has(id)
           ? "standby"
           : service.reachable === false || degraded.has(id)
             ? "offline"
             : service.reachable === true ? "ready" : "unknown",
       status: !hasHealth || !service
-        ? degraded.has(id) ? "Offline" : "Unknown"
+        ? degraded.has(id) ? "Offline" : inferredReady ? "Ready" : "Unknown"
         : service.enabled === false && !degraded.has(id)
           ? "Standby"
           : service.reachable === false || degraded.has(id)
             ? "Offline"
             : service.reachable === true ? "Ready" : "Unknown",
       detail: !hasHealth || !service
-        ? degraded.has(id) ? "Unreachable" : "Waiting for health report"
+        ? degraded.has(id) ? "Unreachable" : inferredReady ? "Reachable" : "Waiting for health report"
         : service.enabled === false && !degraded.has(id)
           ? "Not enabled"
           : service.reachable === false || degraded.has(id)
@@ -288,7 +305,7 @@ export function serviceHealthRows(health) {
     });
   }
 
-  const forwarders = rows.filter((row) => row.id === "oauth" || row.id === "api");
+  const forwarders = rows.filter((row) => FORWARDER_IDS.has(row.id));
   if (!forwarders.length) {
     rows.push({
       id: "forwarders",
