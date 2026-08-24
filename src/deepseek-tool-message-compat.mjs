@@ -40,8 +40,17 @@ function itemId(value) {
   return typeof value === "string" && value ? value : undefined;
 }
 
+function eventItemReference(event) {
+  const direct = itemId(event?.item_id);
+  const nested = itemId(event?.item?.id);
+  return {
+    id: direct ?? nested,
+    conflict: direct !== undefined && nested !== undefined && direct !== nested,
+  };
+}
+
 function eventItemId(event) {
-  return itemId(event?.item_id) ?? itemId(event?.item?.id);
+  return eventItemReference(event).id;
 }
 
 function isToolCall(item) {
@@ -51,6 +60,7 @@ function isToolCall(item) {
 function candidateStart(item) {
   return (
     item?.type === "message" &&
+    item.role === "assistant" &&
     Array.isArray(item.content) &&
     item.content.length === 0
   );
@@ -73,6 +83,7 @@ function exactEmptyPart(part) {
 function exactEmptyMessage(item) {
   return (
     item?.type === "message" &&
+    item.role === "assistant" &&
     Array.isArray(item.content) &&
     item.content.length > 0 &&
     item.content.every(exactEmptyPart)
@@ -236,6 +247,11 @@ export class DeepseekToolMessageCompatTransform extends Transform {
     const event = frame.parsed.event;
     if (this.#suppressed) {
       this.#pushCompacted(frame);
+      return;
+    }
+
+    if (eventItemReference(event).conflict) {
+      this.#failOpen(frame);
       return;
     }
 

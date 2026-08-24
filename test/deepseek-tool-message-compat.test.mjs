@@ -265,6 +265,29 @@ test("malformed and duplicate candidate lifecycles fail open", async () => {
   assert.equal(await transformed(start + second), start + second);
 });
 
+test("conflicting item references and non-assistant messages fail open", async () => {
+  const conflicting = block({
+    type: "response.output_item.added",
+    item_id: "msg_other",
+    output_index: 0,
+    item: { ...blankMessage, status: "in_progress", content: [] },
+  });
+  const tail = phantomToolStream().slice(phantomToolStream().indexOf("\n\n") + 2);
+  assert.equal(await transformed(conflicting + tail), conflicting + tail);
+
+  const nonAssistant = block({
+    type: "response.output_item.added",
+    output_index: 0,
+    item: {
+      ...blankMessage,
+      role: "user",
+      status: "in_progress",
+      content: [],
+    },
+  });
+  assert.equal(await transformed(nonAssistant + tail), nonAssistant + tail);
+});
+
 test("refusal and unknown message parts are never classified as empty", async () => {
   const start = block({
     type: "response.output_item.added",
