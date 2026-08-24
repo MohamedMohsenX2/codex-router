@@ -45,6 +45,7 @@ import {
   writeStreamErrorEvent,
 } from "./http-utils.mjs";
 import { EmptyCompletionGuard } from "./empty-completion-guard.mjs";
+import { deepseekToolMessageCompatTransform } from "./deepseek-tool-message-compat.mjs";
 import {
   ZaiResponsesCompatTransform,
   zaiResponsesCompatTransform,
@@ -3025,6 +3026,10 @@ async function handleResponses(request, response, requestUrl) {
         envelopeCompat = new ZaiResponsesCompatTransform();
       }
       if (envelopeCompat) transforms.push(envelopeCompat);
+      const deepseekToolMessageCompat = route
+        ? deepseekToolMessageCompatTransform(route.provider, contentType)
+        : undefined;
+      if (deepseekToolMessageCompat) transforms.push(deepseekToolMessageCompat);
       // Restore flattened namespace calls for routed chat-completions providers,
       // and inject missing finished-child interrupts for both routed and native
       // multi-agent parents (San Francisco uses native GPT).

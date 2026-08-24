@@ -6881,6 +6881,190 @@ test("a plain follow-up after a thinking turn replays its reasoning", async () =
 });
 
 
+test("router removes DeepSeek's confirmed blank message before a tool call", async () => {
+  const blankMessage = {
+    id: "msg_blank",
+    type: "message",
+    status: "completed",
+    role: "assistant",
+    content: [{ type: "output_text", text: "", annotations: [] }],
+  };
+  const functionCall = {
+    id: "call_list",
+    type: "function_call",
+    call_id: "call_list",
+    name: "exec_command",
+    arguments: "{}",
+    status: "completed",
+  };
+  const gateway = await mockServer(async (request, response) => {
+    await bodyJson(request);
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    const events = [
+      {
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { ...blankMessage, status: "in_progress", content: [] },
+      },
+      {
+        type: "response.content_part.added",
+        item_id: blankMessage.id,
+        output_index: 0,
+        content_index: 0,
+        part: { type: "output_text", text: "", annotations: [] },
+      },
+      {
+        type: "response.output_item.added",
+        output_index: 1,
+        item: { ...functionCall, arguments: "", status: "in_progress" },
+      },
+      {
+        type: "response.function_call_arguments.done",
+        item_id: functionCall.id,
+        output_index: 1,
+        arguments: "{}",
+      },
+      { type: "response.output_item.done", output_index: 1, item: functionCall },
+      {
+        type: "response.output_text.done",
+        item_id: blankMessage.id,
+        output_index: 0,
+        content_index: 0,
+        text: "",
+      },
+      {
+        type: "response.content_part.done",
+        item_id: blankMessage.id,
+        output_index: 0,
+        content_index: 0,
+        part: { type: "reasoning_text", reasoning: "private reasoning" },
+      },
+      { type: "response.output_item.done", output_index: 0, item: blankMessage },
+      {
+        type: "response.completed",
+        response: {
+          id: "resp_tool_only",
+          status: "completed",
+          output: [blankMessage, functionCall],
+          usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+        },
+      },
+    ];
+    response.end(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""));
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "deepseek/deepseek-v4-flash-vision-exp",
+        input: "list files",
+        stream: true,
+      }),
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+    const events = text.split(/\r?\n/)
+      .filter((line) => line.startsWith("data: {"))
+      .map((line) => JSON.parse(line.slice(5).trim()));
+    assert.equal(text.includes(blankMessage.id), false);
+    assert.equal(text.includes("private reasoning"), false);
+    const toolEvents = events.filter(
+      (event) => (event.item_id ?? event.item?.id) === functionCall.id,
+    );
+    assert.ok(toolEvents.length >= 3);
+    assert.ok(toolEvents.every((event) => event.output_index === 0));
+    assert.deepEqual(
+      events.find((event) => event.type === "response.completed").response.output,
+      [functionCall],
+    );
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+  }
+});
+
+test("router does not compact the same blank-message shape on non-DeepSeek routes", async () => {
+  const blank = {
+    id: "msg_blank",
+    type: "message",
+    status: "completed",
+    role: "assistant",
+    content: [{ type: "output_text", text: "", annotations: [] }],
+  };
+  const tool = {
+    id: "call_list",
+    type: "function_call",
+    call_id: "call_list",
+    name: "exec_command",
+    arguments: "{}",
+    status: "completed",
+  };
+  const source = [
+    { type: "response.output_item.added", output_index: 0, item: { ...blank, status: "in_progress", content: [] } },
+    { type: "response.output_item.added", output_index: 1, item: { ...tool, status: "in_progress" } },
+    { type: "response.output_item.done", output_index: 0, item: blank },
+    {
+      type: "response.completed",
+      response: {
+        id: "resp_tool_only",
+        status: "completed",
+        output: [blank, tool],
+        usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
+      },
+    },
+  ].map((event) => `data: ${JSON.stringify(event)}\n\n`).join("");
+  const gateway = await mockServer(async (request, response) => {
+    await bodyJson(request);
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.end(source);
+  });
+  const routerPort = await openPort();
+  const router = run("router.mjs", {
+    CODEX_ROUTER_PORT: String(routerPort),
+    CODEX_ROUTER_GATEWAY_BASE_URL: `http://127.0.0.1:${gateway.port}/v1`,
+    CODEX_ROUTER_QUIET: "1",
+  });
+
+  try {
+    await waitFor(`${routerBase(routerPort)}/models`, router);
+    const response = await fetch(`${routerBase(routerPort)}/responses`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "opencode-go/deepseek-v4-flash",
+        input: "list files",
+        stream: true,
+      }),
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200, text);
+    const events = text.split(/\r?\n/)
+      .filter((line) => line.startsWith("data: {"))
+      .map((line) => JSON.parse(line.slice(5).trim()));
+    assert.ok(text.includes(blank.id));
+    assert.equal(
+      events.find((event) => event.item?.id === tool.id).output_index,
+      1,
+    );
+    assert.deepEqual(
+      events.find((event) => event.type === "response.completed").response.output,
+      [blank, tool],
+    );
+  } finally {
+    await stopChild(router);
+    await closeServer(gateway.server);
+  }
+});
+
 test("router repairs malformed Z.ai message envelopes after LiteLLM Responses translation", async () => {
   const testRoot = mkdtempSync(path.join(os.tmpdir(), "zai-responses-compat-router-"));
   const stateDir = path.join(testRoot, "state");
