@@ -768,30 +768,6 @@ function restoreSignedProviderTable(contents, state) {
   );
 }
 
-function removeWrappedCodexRouterProvider(contents) {
-  // Remove the wrapped [model_providers.codex-router] block created by enabledContents
-  const lines = contents.split("\n");
-  const startIndex = lines.findIndex((line) => line.trim() === providerStartMarker);
-  if (startIndex === -1) return contents;
-
-  const endIndex = lines.findIndex(
-    (line, idx) => idx > startIndex && line.trim() === providerEndMarker,
-  );
-  if (endIndex === -1) return contents;
-
-  // Check if this block contains [model_providers.codex-router]
-  const blockContent = lines.slice(startIndex + 1, endIndex).join("\n");
-  if (!/^\s*\[model_providers\.codex-router\]\s*$/m.test(blockContent)) {
-    return contents;
-  }
-
-  // Remove the entire block including markers
-  return [
-    ...lines.slice(0, startIndex),
-    ...lines.slice(endIndex + 1),
-  ].join("\n");
-}
-
 function managedSignedProviderContents(contents, managedProvider, managedBaseUrl, loginFree = false, existingOwnershipId = undefined) {
   // Remove the legacy codex-router provider table if present, since we're creating
   // an identity-preserving provider table
@@ -799,9 +775,6 @@ function managedSignedProviderContents(contents, managedProvider, managedBaseUrl
   const contentsWithoutLegacy = legacyProvider
     ? removeLegacyManagedRouterProvider(contents, legacyProvider)
     : contents;
-  
-  // Also remove any wrapped codex-router provider block created by enabledContents
-  const contentsWithoutWrapped = removeWrappedCodexRouterProvider(contentsWithoutLegacy);
   
   const state = {
     version: 3,
@@ -814,7 +787,7 @@ function managedSignedProviderContents(contents, managedProvider, managedBaseUrl
   };
   return {
     state,
-    contents: replaceProviderTreeWithManaged(contentsWithoutWrapped, state),
+    contents: replaceProviderTreeWithManaged(contentsWithoutLegacy, state),
   };
 }
 
